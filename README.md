@@ -56,6 +56,7 @@ project replaces it outright with a clean-room implementation.
 | `type_text` | Type text — Chinese, emoji, anything |
 | `scroll` | Scroll a list or page |
 | `drag` | Drag and drop |
+| `move_mouse` | Hover without clicking — how you get down a nested menu |
 | `perform_secondary_action` | Trigger menu items and other extra actions |
 | `clipboard_copy` | Copy and read the selection |
 
@@ -177,6 +178,37 @@ dsh-cua ──writes──> ~/.dsh-cua/<pid>.json + viewport.png
                               │
         client half ──────────┘ polls 1s, renders
 ```
+
+### Changelog
+
+**v0.2** — menus, hover, multi-window, and the degradation ladder
+
+- **Multi-window `get_app_state`.** All of an app's AX windows are rendered
+  into one tree (indices are continuous across windows), so non-modal dialogs
+  are visible and clickable — e.g. Lightroom's import dialog while the Library
+  is focused. The open **menu bar** becomes an extra root, so menu items
+  outside any window (plug-in menus) are addressable by element index.
+- **`move_mouse` tool.** Hover without clicking. macOS opens a submenu on
+  hover, but clicking the parent item activates-and-closes it — hover is the
+  only way down a nested menu.
+- **`AGENT_PROMPT.md`.** A self-contained briefing for any agent:
+  capabilities, enablement, and operating discipline. Paste it as a first
+  message or inject it as skill context.
+- **Measured degradation ladder** (in `skill/SKILL.md`) for apps whose AX
+  tree is shallow or absent, verified on macOS 27:
+
+  | Tier | Measured example | Strategy |
+  |---|---|---|
+  | Full tree | Finder (631 nodes), QQ (1936) | Normal `element_index` flow |
+  | Shallow tree, windows visible | Notion (~400), WeChat (213 nodes, 0 AXWebArea, but 5 windows + 163 menu items) | Coordinates + **menu bar** (always reliable) |
+  | No windows at all | One debug build tested | Menus + blind keyboard nav; ask the user rather than spin |
+
+  Measured on macOS 27: `AXManualAccessibility` set succeeds on Notion but
+  the tree does not grow; WeChat rejects both unlock switches (-25205).
+  Never depend on them — try once, fall back immediately.
+
+**v0.1** — initial release: 11 tools, signed `.app` packaging, live sidebar
+panel, per-process state files, agent skill.
 
 ### Design decisions
 

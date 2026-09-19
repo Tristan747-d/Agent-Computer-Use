@@ -46,7 +46,7 @@ public final class MCPServer {
             respond(id: id, result: [
                 "protocolVersion": "2024-11-05",
                 "capabilities": ["tools": ["listChanged": false]],
-                "serverInfo": ["name": "dsh-computer-use", "version": "1.0.0"],
+                "serverInfo": ["name": "dsh-computer-use", "version": "0.2.0"],
             ])
 
         case "notifications/initialized", "initialized":
