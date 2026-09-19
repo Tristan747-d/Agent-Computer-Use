@@ -60,6 +60,23 @@ mcp__computer__set_value({ app: "TextEdit", element_index: 2, value: "hello" })
 mcp__computer__get_app_state({ app: "TextEdit" })
 ```
 
+## 非原生 app 降级阶梯（实测：macOS 27）
+
+看 `get_app_state` 返回判断层级——AXWebArea 有无、AXGroup/AXStaticText 数量、
+窗口 frame 是否存在：
+
+| 层级 | 特征（实测数据） | 策略 |
+|---|---|---|
+| L1 树完整 | AppKit 原生（Finder 631 节点）；已开 a11y 的 Electron（QQ 1936 节点） | 正常走 element_index |
+| L2 树浅但有窗口 | 未开 a11y 的 Electron（Notion ~400 节点）；WKWebView（微信 213 节点、AXWebArea=0，但 5 个 AXWindow、163 个 AXMenuItem） | 拿窗口 frame → 坐标点击 + type_text；结构化操作走**菜单栏**（永远可靠） |
+| L3 连窗口都没有 | 个别自研 app（实测窗口数为 0） | 只剩菜单+键盘盲走。如实告知用户，不要空转 |
+
+- `AXManualAccessibility` / `AXEnhancedUserInterface` 解锁开关**不可依赖**：
+  实测对 Notion 设置成功但树不增长，对微信返回 -25205/-25208。
+  试一次，两次调用内没效果就立刻放弃转 L2。
+- 无画面时坐标按窗口 frame 相对位置估算，点完必须 get_app_state 验证。
+- 连续 3 次操作验证失败才向上求助，并附上已试坐标和现象。
+
 ## diff 模式
 
 `get_app_state` 默认只回传**与上次快照相比有变化的行**，省 token。

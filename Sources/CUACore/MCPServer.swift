@@ -135,6 +135,13 @@ public final class MCPServer {
         case "click":
             return try clickTool(args)
 
+        case "move_mouse":
+            guard let x = doubleValue(args["x"]), let y = doubleValue(args["y"]) else {
+                throw AXError.invalidArgument("x and y are required")
+            }
+            try actions.moveMouse(to: CGPoint(x: x, y: y))
+            return [["type": "text", "text": "Moved pointer to (\(Int(x)), \(Int(y)))."]]
+
         case "set_value":
             let el = try element(args)
             guard let value = args["value"] as? String else {
@@ -231,13 +238,20 @@ public final class MCPServer {
         // dialog is a separate non-modal window that is not the key window when
         // the Library is focused; clients must be able to see and act on it.
         let windows = ax.allWindows(app)
-        let roots: [AXNode]
+        var roots: [AXNode] = []
         if windows.isEmpty {
             // Fall back to the app element itself if no windows are reported.
             let appEl = ax.keyWindowElement(app)
             roots = (ax.buildTree(root: appEl)).map { [$0] } ?? []
         } else {
             roots = windows.compactMap { ax.buildTree(root: $0) }
+        }
+        // If a menu bar menu is currently open, include the menu bar tree as an
+        // extra root so callers can locate and activate menu items (e.g. a
+        // plug-in's menu entry) by element index.
+        if ax.menuBarHasOpenMenu(app), let menuBar = ax.menuBarElement(app),
+           let menuRoot = ax.buildTree(root: menuBar) {
+            roots.append(menuRoot)
         }
         guard !roots.isEmpty else {
             throw AXError.attributeFailed("could not build AX tree")
@@ -493,6 +507,20 @@ public final class MCPServer {
                 "additionalProperties": false,
             ],
             "annotations": ["readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false],
+        ],
+        [
+            "name": "move_mouse",
+            "description": "Move the pointer to screen coordinates without clicking. Use this to HOVER: macOS opens a menu's submenu on hover, whereas clicking the parent item activates it and closes the menu.",
+            "inputSchema": [
+                "type": "object",
+                "properties": [
+                    "x": ["type": "number", "description": "X coordinate in screen points"],
+                    "y": ["type": "number", "description": "Y coordinate in screen points"],
+                ],
+                "required": ["x", "y"],
+                "additionalProperties": false,
+            ],
+            "annotations": ["readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false],
         ],
         [
             "name": "set_value",

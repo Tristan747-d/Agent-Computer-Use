@@ -90,6 +90,25 @@ public final class ActionBridge {
 
     // MARK: - Mouse
 
+    /// Move the pointer without pressing any button.
+    ///
+    /// Needed for hover-driven UI: macOS opens a menu's submenu on hover, but
+    /// clicking the parent item activates it and closes the menu instead.
+    public func moveMouse(to point: CGPoint, steps: Int = 8) throws {
+        let start = CGEvent(source: nil)?.location ?? point
+        for i in 1...max(1, steps) {
+            let t = CGFloat(i) / CGFloat(max(1, steps))
+            let p = CGPoint(x: start.x + (point.x - start.x) * t,
+                            y: start.y + (point.y - start.y) * t)
+            guard let move = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved,
+                                     mouseCursorPosition: p, mouseButton: .left) else {
+                throw InputError.eventCreationFailed
+            }
+            move.post(tap: .cghidEventTap)
+            usleep(12_000)
+        }
+    }
+
     public func click(x: CGFloat, y: CGFloat, button: String = "left", count: Int = 1) throws {
         let (downType, upType, cgButton) = mouseTypes(button)
         let point = CGPoint(x: x, y: y)

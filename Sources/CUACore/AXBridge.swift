@@ -304,6 +304,30 @@ public final class AXBridge {
         return arr
     }
 
+    /// The app's menu bar element, if the app exposes one. Reading it lets a
+    /// client see and activate menu items (including plug-in menu items) that
+    /// live outside any window — e.g. Lightroom's 文件 → 增效工具额外信息.
+    public func menuBarElement(_ app: NSRunningApplication) -> AXUIElement? {
+        let appEl = appElement(app)
+        guard let v = attribute(appEl, kAXMenuBarAttribute as String),
+              CFGetTypeID(v) == AXUIElementGetTypeID() else { return nil }
+        return (v as! AXUIElement)
+    }
+
+    /// True when at least one menu of the menu bar is currently open (a menu
+    /// whose AXMenu child is non-empty). An always-present, empty menu bar is
+    /// noise; a genuinely opened menu is what callers want to act on.
+    public func menuBarHasOpenMenu(_ app: NSRunningApplication) -> Bool {
+        guard let bar = menuBarElement(app), let barNode = buildTree(root: bar, maxDepth: 3, maxNodes: 400) else {
+            return false
+        }
+        func scan(_ n: AXNode) -> Bool {
+            if n.role == "AXMenu" && !n.children.isEmpty { return true }
+            return n.children.contains(where: scan)
+        }
+        return scan(barNode)
+    }
+
     // MARK: - Rendering to text
 
     /// Diff over several window roots rendered as one document.
