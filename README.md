@@ -1,0 +1,309 @@
+# DSH Computer Use
+
+**Self-built macOS Computer Use for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) — no Codex, no OpenAI, no vendor service.**
+
+Give your DSH agent eyes and hands on your Mac: it reads any app's accessibility
+tree, clicks, types, scrolls, and drags — and you watch it happen in a live
+sidebar panel inside DSH.
+
+```
+┌─────────────────────────────────────────────┐
+│ ● Computer Use                    [暂停][刷新] │
+│   运行中                                      │
+├─────────────────────────────────────────────┤
+│                                             │
+│         < live window frame >      1470×923 │
+│                                             │
+├─────────────────────────────────────────────┤
+│ 目标 app: Finder          元素: 235          │
+│ 窗口: 1470×923            更新于: 13:07:42   │
+│ 最近动作                                     │
+│   13:07:42  读取 Finder 的界面状态            │
+│   13:07:40  列出运行中的 app                  │
+└─────────────────────────────────────────────┘
+```
+
+---
+
+## For Customers
+
+You want your DSH agent to actually *operate* your Mac — open an app, fill a
+form, click a button, read what's on screen. This gives it that.
+
+### Why this exists
+
+macOS's only turnkey Computer Use was Codex's `SkyComputerUseClient`. It is a
+real MCP server and it *does* handshake outside Codex — but every action fails:
+
+```
+Computer Use server error -10000: Sender process is not authenticated
+```
+
+That binary validates the caller's **code-signing identity** through the macOS
+audit token and requires OpenAI's Team ID. No other client can pass. So this
+project replaces it outright with a clean-room implementation.
+
+### What it can do
+
+| Tool | What it does |
+|---|---|
+| `list_apps` | List running apps |
+| `get_app_state` | Read the app's UI (accessibility tree + screenshot) |
+| `click` | Click a button, link, or menu item |
+| `set_value` | Fill a text field directly |
+| `select_text` | Select or position the cursor in text |
+| `press_key` | Keyboard shortcuts (`Cmd+S`, `Return`, arrows…) |
+| `type_text` | Type text — Chinese, emoji, anything |
+| `scroll` | Scroll a list or page |
+| `drag` | Drag and drop |
+| `perform_secondary_action` | Trigger menu items and other extra actions |
+| `clipboard_copy` | Copy and read the selection |
+
+Your agent calls these automatically when a task needs GUI work. There is a
+skill bundled that teaches it *how* to use them well, including the one rule
+that matters most: **re-read the app state after every action**, because
+element indices go stale the moment anything changes.
+
+### Install
+
+```sh
+git clone https://github.com/Tristan747-d/DSH-Computer-Use.git
+cd DSH-Computer-Use
+./build-app.sh --install
+```
+
+Then add two rows to `~/.dsh/profiles/web/cordis.patch.yml`:
+
+```yaml
+- insert:
+    - id: mcp-computer-use
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: computer
+        transport: stdio
+        command: !!js process.env.HOME + '/Applications/dsh-cua.app/Contents/MacOS/dsh-cua'
+        args: ['mcp']
+        toolCallTimeoutMs: 120000
+        failOnStartupError: false
+        reconnect:
+          enabled: true
+
+    - id: computer-use-panel
+      name: 'dsh-computer-use-panel'
+```
+
+And install the panel plugin into the profile:
+
+```sh
+cd ~/.dsh/profiles/web
+pnpm add link:$HOME/Desktop/DSH-Computer-Use/plugin
+```
+
+Copy `skill/SKILL.md` into `~/.dsh/skills/computer-use/SKILL.md` so the agent
+knows how to use the tools. Then restart DSH. The sidebar gets a monitor icon;
+the agent gets 11 new tools.
+
+### Permissions
+
+Two macOS permissions. **Accessibility is required**; Screen Recording is
+optional.
+
+| Permission | Needed for | Status without it |
+|---|---|---|
+| **Accessibility** | Every tool | Nothing works |
+| **Screen Recording** | The live screen image only | Everything else still works |
+
+Grant in **System Settings → Privacy & Security**. Use the built-in checker:
+
+```sh
+~/Applications/dsh-cua.app/Contents/MacOS/dsh-cua doctor
+```
+
+> **Important:** grants attach to the signed app, and **only one copy of the
+> app may exist**. If you keep extra copies around, macOS cannot decide which
+> one you authorized and the grant silently fails to apply. `build-app.sh`
+> removes competing copies automatically.
+
+### Quick test
+
+```sh
+swift run cua-selftest TextEdit
+```
+
+This drives a real app and reports every layer: permissions, app resolution,
+accessibility tree, diff engine, screenshot, key mapping.
+
+### Known limitations
+
+- **The accessibility tree can be incomplete.** Canvas, games, and some
+  Electron apps expose few or no elements. Screenshots plus coordinate clicks
+  are then the only route, and that is less precise. The bundled skill tells
+  the agent to notice this and switch strategy rather than flail.
+- **Screen Recording may be unavailable on recent macOS** for apps launched
+  from a terminal rather than from Finder/LaunchServices. Everything except
+  the live image keeps working.
+- **Don't benchmark while using this.** UI automation holds CPU and GPU
+  continuously, which will corrupt any performance measurement you run on the
+  same machine.
+- **`type_text` presses Return on `\n`.** In a chat box or form, that sends
+  rather than inserting a newline.
+
+---
+
+## For Developers
+
+### Architecture
+
+```
+DSH (web profile)
+  ├─ @deepseek-ai/dsh-mcp-client             stdio
+  │    └─ dsh-cua.app/Contents/MacOS/dsh-cua mcp
+  │         ├─ AXBridge         AX tree walk · element registry · diffing
+  │         ├─ ActionBridge     CGEvent input · AX actions · capture
+  │         ├─ StateBroadcaster live state for the panel
+  │         └─ MCPServer        hand-written JSON-RPC 2.0 over stdio
+  │
+  └─ dsh-computer-use-panel
+       ├─ lib/index.js   host half: /api/computer-use/* routes
+       └─ lib/client.js  client half: sidebar entry + centre panel
+```
+
+Two halves joined by a file:
+
+```
+dsh-cua ──writes──> ~/.dsh-cua/<pid>.json + viewport.png
+                              │
+        host half ────────────┘ reads, serves
+                              │
+        client half ──────────┘ polls 1s, renders
+```
+
+### Design decisions
+
+**Swift, not JXA.** `System Events` reads the AX tree through an AppleEvent
+round-trip: slow, lossy, and it cannot reach every attribute. Direct
+`AXUIElement` calls give the complete tree and `AXUIElementPerformAction`.
+
+**Hand-written MCP, no SDK.** The needed protocol subset is small, and it
+guarantees correct request-id echo. The official binary returns **string** ids
+(`"1"`) for integer requests (`1`), which breaks ordinary MCP clients.
+
+**Shipped as a signed `.app`.** TCC binds grants to the code-signing
+requirement. Ad-hoc signing binds the CDHash, so every rebuild silently revokes
+the grant. An Apple Development certificate binds bundle id + cert CN.
+
+**Per-process state files.** DSH holds one long-lived MCP child but also spawns
+short-lived ones. Each publisher owns `<pid>.json`; the host half merges and
+reports the freshest heartbeat. A dying session can never stamp
+`connected: false` over a live sibling.
+
+**Death by staleness, not by signal.** A process killed without cleanup never
+writes a disconnect. The host half treats a heartbeat older than 15 s as gone.
+
+### Building
+
+```sh
+./build-app.sh              # build, sign, verify
+./build-app.sh --install    # ...and install to ~/Applications
+```
+
+The script hard-fails if `codesign --verify --deep --strict` does not pass.
+Set `DSH_CUA_SIGN_ID=<hash>` to use a different certificate.
+
+### Traps this codebase documents
+
+Every one of these cost real debugging time. They are recorded here so the next
+person loses minutes instead of hours.
+
+**Signing and TCC**
+
+| Trap | Symptom | Fix |
+|---|---|---|
+| JSON `Info.plist` | `codesign` reports the misleading `does not satisfy its Designated Requirement`; app dies with "error 162" | Info.plist must be XML |
+| `CFBundleExecutable` ≠ binary filename | Silent launch failure | Keep them identical |
+| iCloud Drive + `codesign` | `resource fork, Finder information, or similar detritus not allowed` — fileprovider re-applies `com.apple.FinderInfo` *between* `xattr -cr` and `codesign` | Assemble the `.app` in `/tmp`, then install |
+| Multiple copies of one bundle id | Screen Recording grant silently fails to attach | Ship exactly one; `build-app.sh` enforces it |
+
+**DSH plugin system**
+
+| Trap | Symptom | Fix |
+|---|---|---|
+| Declaring both host and `/client` as loader rows | `Error: plugin tree failed to load: window is not defined` — Node imports the browser bundle | Declare ONE row; `dsh.client` puts the browser bundle in the boot graph |
+| Service name casing | Route registration silently absent | It is `ctx.webServer` (capital S) |
+| Getting a translator | `ctx.locale.resolve()` is not the API | `const t = ctx.locale.bind(ns)`; pass it via `inject: () => ({ t })` |
+| `file:` dependency | Edits to plugin source have no effect — pnpm *copies* | Use `link:` so the profile reads your source directly |
+| Client bundle changes | Not picked up | Restart DSH (boot graph is fixed at startup) |
+
+**macOS APIs**
+
+| Trap | Symptom | Fix |
+|---|---|---|
+| `CGWindowListCreateImage` | Marked unavailable in current SDKs | Migrate to ScreenCaptureKit |
+| PID-based liveness for file cleanup | PIDs are recycled — a live sibling's file can be deleted | Prune by file age, never by `kill(pid, 0)` |
+
+### Data contract
+
+`~/.dsh-cua/<pid>.json`:
+
+```jsonc
+{
+  "connected": true,
+  "busy": false,              // an action within the last 6s
+  "pid": 12345,
+  "updatedAt": 1789794972786, // ms epoch; the host half's staleness signal
+  "accessibility": true,
+  "screenRecording": false,
+  "app": "TextEdit",
+  "elementCount": 21,
+  "window": { "x": 146, "y": 71, "width": 656, "height": 422 },
+  "screenshotAt": 1789794972700,
+  "screenshotUrl": "/api/computer-use/viewport.png?t=1789794972700",
+  "recentActions": [
+    { "at": 1789794972775, "tool": "get_app_state",
+      "text": "读取 TextEdit 的界面状态", "error": false }
+  ]
+}
+```
+
+### Client plugin notes
+
+The panel registers two slots:
+
+| Slot | Kind | Purpose |
+|---|---|---|
+| `sidebar.panellist` | list | The sidebar entry; its `id` is also the main-slot key |
+| `main` | keyed | The centre panel under key `computer-use` |
+
+Copy is thunked so a language change needs no re-registration. The host half is
+defensive by design: a missing file, malformed JSON, or a dead publisher all
+degrade to a rendered "disconnected" state rather than a broken mount.
+
+### Repository layout
+
+```
+.
+├── Package.swift
+├── build-app.sh                  # build → sign → verify → install
+├── Sources/
+│   ├── CUACore/
+│   │   ├── AXBridge.swift        # AX tree, element registry, diffing
+│   │   ├── ActionBridge.swift    # CGEvent input, AX actions, capture
+│   │   ├── StateBroadcaster.swift# live state for the panel
+│   │   └── MCPServer.swift       # JSON-RPC over stdio, 11 tool schemas
+│   ├── dsh-cua/main.swift        # mcp | doctor | request-perms
+│   └── cua-selftest/main.swift   # live-app verification
+├── plugin/
+│   ├── lib/index.js              # host half: routes
+│   ├── lib/client.js             # client half: UI
+│   └── package.json              # dsh.client declaration
+└── skill/SKILL.md                # teaches the agent to use the tools well
+```
+
+### Contributing
+
+The traps tables above are the most valuable part of this repo. If you hit a
+new one, add a row — with the exact symptom text, so it is greppable.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

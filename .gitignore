@@ -1,0 +1,21 @@
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# Build output of build-app.sh (the .app is produced fresh on every build and
+# must NOT be committed: a second copy of the bundle id breaks TCC grants)
+build/
+
+# macOS
+.DS_Store
+._*
+
+# Editor
+*.xcuserstate
+xcuserdata/
+.idea/
+.vscode/
+
+# Local state published at runtime
+*.tmp
