@@ -57,17 +57,49 @@ public final class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Our own bundle id: the server must never be asked to film itself.
     public static let ownBundleID = "com.tristan.dsh.computeruse"
 
+    /// Bundle ids that *are* a DSH surface, and so must never be filmed.
+    ///
+    /// Bundle id is the load-bearing check; title and URL matching below are
+    /// only a safety net for surfaces we cannot enumerate. When a new way of
+    /// displaying the harness is added, add its bundle id here.
+    ///
+    /// - `com.tristan.dsh.computeruse` — this server's own bundle.
+    /// - `com.tristan.dsh.launcher` — **DSH Launcher**, the native WKWebView
+    ///   shell (`~/Applications/DSH Launcher.app`) that renders the harness in
+    ///   a window titled "DeepSeek Harness". This is the primary surface now.
+    /// - `com.apple.Safari.WebApp.*` — Safari web apps, which is how the older
+    ///   DSH desktop wrapper was packaged (`DSH 2.app` before the native shell
+    ///   existed).
+    /// - `com.apple.Safari` / Chrome / Edge / Firefox — a *whole browser* is not
+    ///   refused outright because an agent may legitimately stream a different
+    ///   tab; these are only refused when the window's own title or URL says it
+    ///   is showing the harness.
+    public static let harnessOwningBundleIDs: Set<String> = [
+        "com.tristan.dsh.computeruse",
+        "com.tristan.dsh.launcher",
+    ]
+
+    /// Loopback ports DSH itself is known to bind: the default 3080, plus the
+    /// band DSH Launcher walks when 3080 is already taken.
+    ///
+    /// Deliberately NOT "any loopback URL": an agent may legitimately stream the
+    /// user's own local dev server on, say, `127.0.0.1:3000`, and refusing that
+    /// would be a real regression. The window-title check catches a harness
+    /// served from any other port.
+    public static let dshPortBand = 3080...3099
+
     /// Whether targeting this window would film the Computer Use panel itself.
     ///
     /// Returns a human-readable reason when capture should be refused, or nil
-    /// when it is safe. Two things count as "the DSH surface":
+    /// when it is safe. The checks, strongest first:
     ///
-    /// 1. **A Safari web app whose bundle id starts with
-    ///    `com.apple.Safari.WebApp.`** — the DSH desktop wrapper is exactly that
-    ///    (`DSH 2.app` → `com.apple.Safari.WebApp.8ED4…`).
-    /// 2. **A browser window showing the DSH UI**, detected from the window
-    ///    title or URL. The panel is served by the DSH webserver (default
-    ///    `127.0.0.1:3080`) and the page title ends with "DeepSeek Harness".
+    /// 1. **A bundle id that is a DSH surface** (see
+    ///    {@link harnessOwningBundleIDs}) — including DSH Launcher and any
+    ///    `com.apple.Safari.WebApp.*` wrapper.
+    /// 2. **A window showing the DSH UI**, detected from the window title or URL.
+    ///    The panel is served by the DSH webserver (default `127.0.0.1:3080`),
+    ///    the page title is "DeepSeek Harness", and DSH Launcher may bind a
+    ///    fallback port in {@link dshPortBand}.
     ///
     /// This is deliberately about *the window*, not the whole app: an agent may
     /// legitimately need to stream a different Safari tab, so refusing all of
@@ -78,19 +110,34 @@ public final class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
         if let b = bundleID, b == ownBundleID {
             return "that is the Computer Use server's own bundle."
         }
+        if let b = bundleID, harnessOwningBundleIDs.contains(b) {
+            return "that is the DSH desktop shell (bundle id \(b)), which renders the "
+                 + "harness and therefore this panel."
+        }
         if let b = bundleID, b.hasPrefix("com.apple.Safari.WebApp.") {
             return "that is a Safari web app, which is how the DSH interface is packaged "
                  + "(bundle id \(b))."
         }
-        let haystack = [windowTitle, url, appName].compactMap { $0 }.joined(separator: " ").lowercased()
+        let haystack = [windowTitle, url, appName].compactMap { $0 }.joined(separator: " ")
+            .lowercased()
         if haystack.contains("deepseek harness") {
             return "that window is showing the DSH interface (its title says \"DeepSeek Harness\")."
         }
-        if let u = url?.lowercased(),
-           u.contains("127.0.0.1:3080") || u.contains("localhost:3080") {
-            return "that window is pointed at the DSH webserver (127.0.0.1:3080)."
+        if let u = url?.lowercased(), let port = loopbackPort(of: u), dshPortBand.contains(port) {
+            return "that window is pointed at the DSH webserver (127.0.0.1:\(port))."
         }
         return nil
+    }
+
+    /// Extract the port from a loopback URL, or nil when the host is not
+    /// loopback. Accepts `127.0.0.1`, `localhost` and `[::1]`.
+    public static func loopbackPort(of url: String) -> Int? {
+        guard url.contains("127.0.0.1") || url.contains("localhost") || url.contains("[::1]")
+        else { return nil }
+        // The port is the digit run after the authority's final colon.
+        guard let colon = url.lastIndex(of: ":") else { return nil }
+        let digits = url[url.index(after: colon)...].prefix { $0.isNumber }
+        return Int(digits)
     }
 
     /// Convenience check for a concrete SCWindow, used by the automatic follow path.
