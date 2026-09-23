@@ -59,11 +59,47 @@ project replaces it outright with a clean-room implementation.
 | `move_mouse` | Hover without clicking — how you get down a nested menu |
 | `perform_secondary_action` | Trigger menu items and other extra actions |
 | `clipboard_copy` | Copy and read the selection |
+| `start_live_view` | Start a **live video** of an app's window (background-safe) |
+| `stop_live_view` | Stop the live video |
+| `live_view_status` | Report streaming stats and the stream URL |
 
 Your agent calls these automatically when a task needs GUI work. There is a
 skill bundled that teaches it *how* to use them well, including the one rule
 that matters most: **re-read the app state after every action**, because
 element indices go stale the moment anything changes.
+
+### Live video
+
+The sidebar panel shows a **continuous video** of whatever window the agent is
+working on — not a slideshow of stills.
+
+Under the hood: **ScreenCaptureKit** captures the target window (a specific
+window, not the whole display), frames are JPEG-encoded once, and they are
+fanned out to every viewer as `multipart/x-mixed-replace` MJPEG. A plain
+`<img>` renders that natively — no decoder, no WebSocket, no JS library — and
+because the encode happens once per frame, ten viewers cost exactly one encode.
+
+Measured on this machine: **10 fps sustained**, ~130 KB per frame at 1600 px on
+the long edge, and — the part that matters — **the captured window is never
+brought to the front**. ScreenCaptureKit can capture a background window, so the
+silence contract survives: you can keep working in another app while watching
+the agent work.
+
+The stream is served on an ephemeral **loopback-only** port (`127.0.0.1`), so it
+is never reachable off the machine. It stops when the session ends, or on
+`stop_live_view`.
+
+**The panel never films itself.** Pointing the stream at the surface that renders
+the panel would nest the image inside itself forever. The server refuses to
+capture a window that is showing the DSH interface — detected from the window
+title, the DSH webserver URL, the DSH bundle id, or a `com.apple.Safari.WebApp.*`
+bundle (which is how the DSH desktop wrapper is packaged), and the refusal names
+the reason. The check is per *window*, not per app, so streaming a different
+Safari tab still works. It is enforced on both paths: the explicit
+`start_live_view` call and the automatic follow that `get_app_state` triggers.
+
+`get_app_state` still returns a single still alongside the accessibility tree for
+the model's own use; the live stream is for the human watching the panel.
 
 ### Install
 
@@ -180,6 +216,35 @@ dsh-cua ──writes──> ~/.dsh-cua/<pid>.json + viewport.png
 ```
 
 ### Changelog
+
+**v2.1** — live video
+
+- **Live video in the panel.** `start_live_view` / `stop_live_view` /
+  `live_view_status` stream the target window at 10 fps over loopback MJPEG.
+  ScreenCaptureKit captures a *background* window, so the app under observation
+  is never raised. See "Live video" above.
+
+**v2.0** — silent by default
+
+- **Nothing steals focus any more.** Actions are delivered straight to the
+  target process — Accessibility API calls and `CGEvent.postToPid()` — instead
+  of being synthesized at the system HID tap. The old code called `activate()`
+  before every action because that was the only way to synthesize a *click*;
+  the AX hit test removed that need.
+- **Coordinate clicks are now AX hit-test + `AXPress`**, and **scrolling writes
+  the `AXScrollBar` value** (verified after the write). Raw `postToPid` mouse
+  clicks, wheel events and Command shortcuts are silently *dropped* by macOS for
+  background apps — measured, not assumed — so the code does not rely on them.
+- **`type_text` no longer touches the clipboard.** It injects Unicode via
+  `postToPid`: CJK-safe, no pasteboard clobbering, ~1.4 s for 1200 characters.
+- **`clipboard_copy` no longer sends Cmd+C.** It reads `AXSelectedText`, so the
+  user's pasteboard is never disturbed.
+- **Right/middle clicks fail loudly** when no `AXShowMenu` exists, instead of
+  quietly performing a left click (which would run a different action).
+- **`allow_foreground: true`** is the explicit opt-in for a focus-stealing HID
+  fallback; every result reports which delivery path was used.
+- **`cua-selftest` now asserts silence**: it records the frontmost app before
+  and after each action and fails if it ever changed.
 
 **v0.2** — menus, hover, multi-window, and the degradation ladder
 

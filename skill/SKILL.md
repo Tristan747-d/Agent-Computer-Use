@@ -14,18 +14,35 @@ whenToUse: 需要点击/输入/读取某个 Mac app 的界面时；或用户让�
 | 工具 | 只读 | 用途 |
 |---|---|---|
 | `mcp__computer__list_apps` | ✅ | 列出正在运行的正规 app |
-| `mcp__computer__get_app_state` | ✅ | 取 app 关键窗口的 AX 树 + 截图 |
+| `mcp__computer__get_app_state` | ✅ | 取 app 关键窗口的 AX 树 + 截图（**不会抢前台**） |
 | `mcp__computer__click` | | 按 element_index 或坐标点击 |
 | `mcp__computer__set_value` | | 直接写 AXValue（表单首选） |
 | `mcp__computer__select_text` | | 按文本匹配选中/定位光标 |
 | `mcp__computer__press_key` | | xdotool 风格按键，如 `"Return"`、`"super+c"` |
-| `mcp__computer__type_text` | | 输入文本（走剪贴板，支持中文） |
+| `mcp__computer__type_text` | | 输入文本（postToPid 直投，**不碰剪贴板**，支持中文） |
 | `mcp__computer__scroll` | | 滚动 |
 | `mcp__computer__drag` | | 拖拽 |
 | `mcp__computer__perform_secondary_action` | | 执行 AX 树里列出的额外 action |
-| `mcp__computer__clipboard_copy` | ✅ | Cmd+C 后读剪贴板 |
+| `mcp__computer__clipboard_copy` | ✅ | 读 `AXSelectedText`（**不发 Cmd+C**，不动剪贴板） |
+| `mcp__computer__start_live_view` | ✅ | 开启目标窗口**实时视频**（10fps MJPEG，不抢前台） |
+| `mcp__computer__stop_live_view` | ✅ | 停止实时视频 |
+| `mcp__computer__live_view_status` | ✅ | 查询实时视频状态与流地址 |
 
 `app` 参数可用**显示名、完整路径或 bundle id**。app 没运行时会自动后台拉起。
+
+## 静默铁律（v2.0 起）
+
+**所有动作默认静默**：直投目标进程（AX API / `CGEvent.postToPid`），**绝不把 app 抢到前台**，
+用户的前台、焦点、光标、剪贴板都不受影响。想看画面就开 `start_live_view`（实时视频，
+ScreenCaptureKit 抓后台窗口），不要靠反复截图。
+
+少数动作 macOS 会静默丢弃（对后台 app 无效），**不要依赖**：
+- `postToPid` 的**鼠标点击 / 滚轮 / ⌘ 组合键** → 全部不投递。
+  改用：坐标点击走 AX 命中测试→`AXPress`；滚动写 `AXScrollBar` 值；⌘ 快捷键改用 `set_value`/菜单 AX action。
+- 只有显式传 `allow_foreground: true` 才允许 HID 兜底（会抢前台），返回值里 `delivery=hidTap` 就是它发生了。
+
+**唯一会强制抢前台的是模态框**（如改完文档正常退出弹「保存吗」）——那是 app 自己的行为，
+静默方案挡不住，测试时请用 `kill -9` 避免遗留此类状态。
 
 ## 铁律
 

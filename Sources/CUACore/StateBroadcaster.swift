@@ -20,6 +20,8 @@ public final class StateBroadcaster {
     private var lastWindow: [String: Any]?
     private var lastElementCount: Int?
     private var lastShotAt: Date?
+    private var streamURL: String?
+    private var streamerStatus: [String: Any]?
     private let maxActions = 40
 
     public init() {
@@ -32,6 +34,24 @@ public final class StateBroadcaster {
 
     /// Absolute path the panel's host half serves as the image URL.
     public var viewportPath: String { shotPath.path }
+
+    /// Publish (or clear) the live MJPEG URL for the panel.
+    public func setStreamURL(_ url: String?) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.streamURL = url
+            self.flush()
+        }
+    }
+
+    /// Publish live streamer statistics (frames, fps, viewers).
+    public func setStreamerStatus(_ status: [String: Any]?) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.streamerStatus = status
+            self.flush()
+        }
+    }
 
     // MARK: - Recording
 
@@ -102,6 +122,9 @@ public final class StateBroadcaster {
             "recentActions": recentActions,
             "screenshotAt": lastShotAt.map { Int($0.timeIntervalSince1970 * 1000) } ?? NSNull(),
             "screenshotAvailable": FileManager.default.fileExists(atPath: shotPath.path),
+            // Live video: an MJPEG URL the panel can drop straight into an <img>.
+            "streamUrl": streamURL ?? NSNull(),
+            "stream": streamerStatus ?? NSNull(),
         ]
         doc["screenshotUrl"] = doc["screenshotAvailable"] as? Bool == true
             ? "/api/computer-use/viewport.png?t=\(doc["screenshotAt"] ?? 0)"

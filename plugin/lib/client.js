@@ -63,6 +63,7 @@ window.__ModuleLoader__.load({
 			"empty.title": "Computer Use 待命中",
 			"empty.hint": "模型操作本机 app 时，这里会实时显示画面与动作。",
 			"empty.noscreen": "缺少「屏幕录制」权限，无法显示画面。可在 系统设置 → 隐私与安全性 → 屏幕录制 中授权 dsh-cua.app。",
+			"badge.live": "实时",
 			"kv.app": "目标 app",
 			"kv.window": "窗口",
 			"kv.elements": "元素",
@@ -83,6 +84,7 @@ window.__ModuleLoader__.load({
 			"empty.title": "Computer Use standing by",
 			"empty.hint": "When the model operates an app, its screen and actions appear here live.",
 			"empty.noscreen": "Screen Recording permission is missing, so no live image is available. Grant it to dsh-cua.app in System Settings → Privacy & Security → Screen Recording.",
+			"badge.live": "LIVE",
 			"kv.app": "Target app",
 			"kv.window": "Window",
 			"kv.elements": "Elements",
@@ -157,6 +159,11 @@ window.__ModuleLoader__.load({
 							: t("state.idle");
 
 			const shot = state && state.screenshotUrl ? state.screenshotUrl : null;
+			// Prefer the live MJPEG stream when the agent has started one: it is a
+			// continuous multipart/x-mixed-replace response, which an <img> renders
+			// natively with no decoder and no polling. The still is the fallback for
+			// when Screen Recording is granted but no live session is running.
+			const liveStream = state && state.streamUrl ? state.streamUrl : null;
 			const frame = state && state.window
 				? `${state.window.width}×${state.window.height}`
 				: null;
@@ -198,16 +205,24 @@ window.__ModuleLoader__.load({
 						]
 					}),
 
-					// stage: the live image
+					// stage: the live image (MJPEG stream when running, else a still)
 					h("div", {
 						className: "cua-stage",
-						children: shot
+						children: (liveStream || shot)
 							? jsxs(Fragment, {
 								children: [
 									h("img", {
 										className: "cua-shot",
-										src: shot,
+										// `src` is only swapped when the target changes;
+										// re-assigning the same MJPEG URL would restart
+										// the connection on every poll.
+										src: liveStream || shot,
 										alt: (state && state.app) || "Computer Use viewport"
+									}),
+									live && h("div", {
+										className: "cua-badge",
+										style: { left: 8, right: "auto" },
+										children: t("badge.live")
 									}),
 									frame !== null && h("div", { className: "cua-badge", children: frame })
 								]

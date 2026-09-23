@@ -12,6 +12,11 @@ public final class MCPServer {
     private let stdoutHandle = FileHandle.standardOutput
     private let state = StateBroadcaster()
 
+    /// Live video of the window under the agent's attention. SCK captures a
+    /// background window without raising it, preserving the silence contract.
+    private let streamer = ScreenStreamer()
+    private lazy var mjpeg = MJPEGServer(streamer: streamer)
+
     private var initialized = false
 
     public init() {
@@ -22,7 +27,19 @@ public final class MCPServer {
     }
 
     public func run() {
-        defer { state.markDisconnected() }
+        // Serve the live video on a loopback-only port and advertise it to the
+        // panel. Failure here is non-fatal: every other tool still works.
+        mjpeg.start { [weak self] port in
+            guard let self else { return }
+            self.state.setStreamURL(port.map { "http://127.0.0.1:\($0)/stream.mjpg" })
+        }
+
+        defer {
+            mjpeg.stop()
+            streamer.stop()
+            state.setStreamURL(nil)
+            state.markDisconnected()
+        }
         while let line = readLine(strippingNewline: true) {
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.isEmpty { continue }
@@ -46,7 +63,7 @@ public final class MCPServer {
             respond(id: id, result: [
                 "protocolVersion": "2024-11-05",
                 "capabilities": ["tools": ["listChanged": false]],
-                "serverInfo": ["name": "dsh-computer-use", "version": "0.2.0"],
+                "serverInfo": ["name": "dsh-computer-use", "version": "2.1.0"],
             ])
 
         case "notifications/initialized", "initialized":
@@ -117,11 +134,18 @@ public final class MCPServer {
         case "drag": return "拖拽 → \(s("app") ?? "?")"
         case "perform_secondary_action": return "执行 \(s("action") ?? "?") → \(s("app") ?? "?")"
         case "clipboard_copy": return "复制 \(s("app") ?? "?") 的选中内容"
+        case "start_live_view": return "开启实时画面 → \(s("app") ?? "?")"
+        case "stop_live_view": return "停止实时画面"
+        case "live_view_status": return "查询实时画面状态"
         default: return name
         }
     }
 
     private func call(name: String, args: [String: Any]) throws -> [[String: Any]] {
+        // Foreground fallback is opt-in per call, and off unless asked for.
+        actions.allowsForegroundFallback = (args["allow_foreground"] as? Bool) ?? false
+        defer { actions.allowsForegroundFallback = false }
+
         switch name {
         case "list_apps":
             let apps = ax.listApps()
@@ -140,7 +164,9 @@ public final class MCPServer {
                 throw AXError.invalidArgument("x and y are required")
             }
             try actions.moveMouse(to: CGPoint(x: x, y: y))
-            return [["type": "text", "text": "Moved pointer to (\(Int(x)), \(Int(y)))."]]
+            return [["type": "text", "text":
+                "Moved pointer to (\(Int(x)), \(Int(y))). Note: moving the cursor is inherently visible "
+                + "to the user; no click was performed."]]
 
         case "set_value":
             let el = try element(args)
@@ -148,7 +174,7 @@ public final class MCPServer {
                 throw AXError.invalidArgument("value is required")
             }
             try actions.setValue(el, value)
-            return [["type": "text", "text": "Set value on element \(try index(args))."]]
+            return [["type": "text", "text": "Set value on element \(try index(args)) via AX (silent)."]]
 
         case "select_text":
             return try selectText(args)
@@ -157,25 +183,25 @@ public final class MCPServer {
             guard let key = args["key"] as? String else {
                 throw AXError.invalidArgument("key is required")
             }
-            if let appName = args["app"] as? String {
-                let app = try ax.resolveApp(appName)
-                actions.activate(app)
-                usleep(120_000)
-            }
-            try actions.pressKey(key)
-            return [["type": "text", "text": "Pressed \(key). Re-fetch app state to confirm the result."]]
+            let app = try ax.resolveApp(try requireApp(args))
+            let r = try actions.pressKeySilent(key, pid: app.processIdentifier)
+            return [["type": "text", "text": "\(r.detail)\nRe-fetch app state to confirm the result."]]
 
         case "type_text":
             guard let text = args["text"] as? String else {
                 throw AXError.invalidArgument("text is required")
             }
-            if let appName = args["app"] as? String {
-                let app = try ax.resolveApp(appName)
-                actions.activate(app)
-                usleep(120_000)
+            let app = try ax.resolveApp(try requireApp(args))
+            // Put keyboard focus on the intended element if one was named. This is
+            // an in-app focus change only; the app does not come forward.
+            var focusedNote = ""
+            if let el = try? element(args) {
+                if actions.focus(el) { focusedNote = " (focused element \(try index(args)))" }
             }
-            try actions.typeText(text)
-            return [["type": "text", "text": "Typed \(text.count) characters. Re-fetch app state to confirm."]]
+            try actions.typeUnicode(text, pid: app.processIdentifier)
+            return [["type": "text", "text":
+                "Typed \(text.count) characters into \(app.localizedName ?? "?") via postToPid\(focusedNote) — "
+                + "no clipboard used, app not brought forward. Re-fetch app state to confirm."]]
 
         case "scroll":
             return try scrollTool(args)
@@ -189,20 +215,138 @@ public final class MCPServer {
                 throw AXError.invalidArgument("action is required")
             }
             try actions.performAction(el, action)
-            return [["type": "text", "text": "Performed AX action '\(action)'."]]
+            return [["type": "text", "text": "Performed AX action '\(action)' (silent)."]]
 
         case "clipboard_copy":
-            let app = try ax.resolveApp(try requireApp(args))
-            actions.activate(app)
-            usleep(120_000)
-            try actions.pressKey("super+c")
-            usleep(200_000)
-            let s = NSPasteboard.general.string(forType: .string) ?? ""
-            return [["type": "text", "text": "Clipboard after copy:\n\(s)"]]
+            return try readSelection(args)
+
+        case "start_live_view":
+            return try startLiveView(args)
+
+        case "stop_live_view":
+            streamer.stop()
+            state.setStreamURL(nil)
+            state.setStreamerStatus(nil)
+            return [["type": "text", "text": "Live view stopped."]]
+
+        case "live_view_status":
+            return try liveViewStatus(args)
 
         default:
             throw AXError.invalidArgument("Unknown tool: \(name)")
         }
+    }
+
+    /// Point the live video at an app's window and start streaming.
+    ///
+    /// Streaming does not raise the window: ScreenCaptureKit can capture a
+    /// background window, so this keeps the silence contract intact.
+    ///
+    /// **Why the self-capture guard matters:** the DSH UI itself is where this
+    /// panel is rendered. Asking someone to "watch the agent work" on the very
+    /// canvas that displays the video would nest the image inside itself
+    /// forever. The guard is therefore applied in two places: here, when an app
+    /// is explicitly requested, and inside `ScreenStreamer` for the automatic
+    /// follow that `get_app_state` triggers.
+    private func startLiveView(_ args: [String: Any]) throws -> [[String: Any]] {
+        let app = try ax.resolveApp(try requireApp(args))
+        guard let wid = actions.windowID(for: app) else {
+            throw AXError.attributeFailed(
+                "no on-screen window found for \(app.localizedName ?? "?"); nothing to stream")
+        }
+        let appLabel = app.localizedName ?? app.bundleIdentifier ?? "?"
+
+        if let reason = ScreenStreamer.selfCaptureReason(
+            bundleID: app.bundleIdentifier,
+            windowTitle: actions.stringAttribute(ax.keyWindowElement(app), kAXTitleAttribute as String),
+            appName: appLabel) {
+            throw AXError.invalidArgument("""
+            Refusing to stream \(appLabel): \(reason)
+            Streaming this window would film the Computer Use panel itself and nest \
+            the image inside itself endlessly. Point start_live_view at the app being \
+            worked on instead.
+            """)
+        }
+
+        // Wait briefly for the capture to actually start so the answer is truthful
+        // rather than optimistic.
+        let sem = DispatchSemaphore(value: 0)
+        var startError: Error?
+        streamer.start(windowID: wid, appName: appLabel) { err in
+            startError = err
+            sem.signal()
+        }
+        _ = sem.wait(timeout: .now() + 8)
+
+        if let startError {
+            throw AXError.actionFailed("could not start live view: \(startError.localizedDescription)")
+        }
+
+        let status = streamer.status()
+        state.setStreamerStatus(status)
+        let url = mjpeg.port == 0 ? nil : "http://127.0.0.1:\(mjpeg.port)/stream.mjpg"
+        state.setStreamURL(url)
+
+        let frontNote = NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier
+            ? "The app is currently frontmost."
+            : "The app is in the background and was NOT brought forward."
+
+        return [["type": "text", "text": """
+        Live view started for \(appLabel) (window \(wid)).
+        \(frontNote)
+        MJPEG stream: \(url ?? "<unavailable>")
+        Frame: \(status["fps"] ?? streamer.framesPerSecond) fps, up to \(Int(streamer.maxEdge))px on the long edge, JPEG.
+        The DSH Computer Use panel picks this up automatically; frames keep flowing until stop_live_view or the session ends.
+        """]]
+    }
+
+    private func liveViewStatus(_ args: [String: Any]) throws -> [[String: Any]] {
+        let s = streamer.status()
+        state.setStreamerStatus(s)
+        let json = (try? JSONSerialization.data(withJSONObject: s, options: [.prettyPrinted, .sortedKeys]))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        let url = mjpeg.port == 0 ? "<unavailable>" : "http://127.0.0.1:\(mjpeg.port)/stream.mjpg"
+        return [["type": "text", "text": "Live view status (\(url)):\n\(json)"]]
+    }
+
+    /// Read the app's current text selection **through Accessibility**, without
+    /// touching the clipboard. Replaces the old Cmd+C approach, which both stole
+    /// focus and clobbered the user's pasteboard.
+    private func readSelection(_ args: [String: Any]) throws -> [[String: Any]] {
+        let app = try ax.resolveApp(try requireApp(args))
+        let appEl = ax.appElement(app)
+
+        // 1. The focused element's selection (most precise).
+        if let fe = actions.focusedElement(app),
+           let s = actions.stringAttribute(fe, kAXSelectedTextAttribute as String), !s.isEmpty {
+            return [["type": "text", "text": "Selected text (from focused element, silent):\n\(s)"]]
+        }
+
+        // 2. The named element's selection.
+        if let el = try? element(args),
+           let s = actions.stringAttribute(el, kAXSelectedTextAttribute as String), !s.isEmpty {
+            return [["type": "text", "text": "Selected text (from element, silent):\n\(s)"]]
+        }
+
+        // 3. Any element in the tree that reports a selection.
+        if let win = ax.attributeTreeRoot(appEl), let s = findSelectedText(win, depth: 30) {
+            return [["type": "text", "text": "Selected text (found in tree, silent):\n\(s)"]]
+        }
+
+        return [["type": "text", "text":
+            "No text selection is currently exposed via Accessibility for \(app.localizedName ?? "?"). "
+            + "Nothing was copied and the clipboard was not touched. "
+            + "Use get_app_state to find an element and read its value instead, or select text first with select_text."]]
+    }
+
+    private func findSelectedText(_ el: AXUIElement, depth: Int) -> String? {
+        if depth <= 0 { return nil }
+        if let s = actions.stringAttribute(el, kAXSelectedTextAttribute as String), !s.isEmpty { return s }
+        guard let kids = actions.attribute(el, kAXChildrenAttribute as String) as? [AXUIElement] else { return nil }
+        for k in kids {
+            if let s = findSelectedText(k, depth: depth - 1) { return s }
+        }
+        return nil
     }
 
     private func requireApp(_ args: [String: Any]) throws -> String {
@@ -273,27 +417,28 @@ public final class MCPServer {
                     "data": try Data(contentsOf: URL(fileURLWithPath: path)).base64EncodedString(),
                     "mimeType": "image/png",
                 ])
-                // Mirror the same frame into the sidebar viewport.
-                state.recordViewport(
-                    pngPath: path,
-                    app: app.localizedName ?? app.bundleIdentifier ?? "?",
-                    window: ax.windowFrame(app),
-                    elementCount: ax.registry.count
-                )
             } catch {
                 screenshotNote = "screenshot unavailable: \((error as? CustomStringConvertible)?.description ?? "\(error)")"
-                state.recordViewport(
-                    pngPath: path,
-                    app: app.localizedName ?? app.bundleIdentifier ?? "?",
-                    window: ax.windowFrame(app),
-                    elementCount: ax.registry.count
-                )
             }
+
+            // Keep the live video pointed at whatever the agent is looking at.
+            // ScreenCaptureKit captures a window even while it is in the
+            // background, so this never brings the app forward.
+            let appLabel = app.localizedName ?? app.bundleIdentifier ?? "?"
+            streamer.start(windowID: wid, appName: appLabel) { _ in }
+            state.recordViewport(
+                pngPath: path,
+                app: appLabel,
+                window: ax.windowFrame(app),
+                elementCount: ax.registry.count
+            )
         } else {
             screenshotNote = "screenshot unavailable: no on-screen window found"
         }
 
+        let isFront = NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier
         var header = "App: \(app.localizedName ?? "?") (\(app.bundleIdentifier ?? "?"))\n"
+        header += "Frontmost: \(isFront ? "yes (this app is currently frontmost)" : "no (running in the background)")\n"
         header += "Window frame: \(ax.windowFrame(app).map { "@\(Int($0.origin.x)),\(Int($0.origin.y)) \(Int($0.width))x\(Int($0.height))" } ?? "unknown")\n"
         if let note = screenshotNote { header += "Note: \(note)\n" }
         header += "Elements in this snapshot: \(ax.registry.count)\n\n"
@@ -311,45 +456,40 @@ public final class MCPServer {
 
     private func clickTool(_ args: [String: Any]) throws -> [[String: Any]] {
         let app = try ax.resolveApp(try requireApp(args))
+        let appEl = ax.appElement(app)
+        let pid = app.processIdentifier
         let button = args["mouse_button"] as? String ?? "left"
         let count = args["click_count"] as? Int ?? 1
 
-        // Prefer an AX hit-test at coordinates; then fall back to raw CGEvent.
+        // Coordinate click: resolve through the AX hit test, then AXPress. Silent.
         if let x = doubleValue(args["x"]), let y = doubleValue(args["y"]) {
-            try actions.click(x: x, y: y, button: button, count: count)
-            return [["type": "text", "text": "Clicked (\(Int(x)), \(Int(y))) button=\(button) count=\(count)."]]
+            let r = try actions.clickSilent(appEl: appEl, pid: pid, x: x, y: y, button: button, count: count)
+            return [["type": "text", "text": "\(r.detail)\ndelivery=\(r.delivery.rawValue)"]]
         }
 
         let el = try element(args)
-        // Scroll/click via AXPress when available, else synthesize at center.
-        var names: CFArray?
-        if AXUIElementCopyActionNames(el, &names) == .success,
-           let list = names as? [String], list.contains(kAXPressAction as String) {
-            try actions.performAction(el, kAXPressAction as String)
-            return [["type": "text", "text": "Pressed element \(try index(args))."]]
+
+        // Preferred: press the element itself through AX.
+        if let r = try? actions.press(el) {
+            return [["type": "text", "text": "\(r.detail) element \(try index(args)).\ndelivery=\(r.delivery.rawValue)"]]
         }
 
-        if let center = centerOf(el) {
-            try actions.click(x: center.x, y: center.y, button: button, count: count)
-            return [["type": "text", "text": "Element \(try index(args)) has no AXPress; clicked its center (\(Int(center.x)), \(Int(center.y)))."]]
+        // No AX action on the element (common for custom-drawn UI). Fall back to a
+        // silent hit-test click at its center; ancestors are tried too.
+        if let center = actions.centerOf(el) {
+            let r = try actions.clickSilent(appEl: appEl, pid: pid, x: center.x, y: center.y,
+                                            button: button, count: count)
+            return [["type": "text", "text":
+                "Element \(try index(args)) has no AX action; \(r.detail)\ndelivery=\(r.delivery.rawValue)"]]
         }
 
-        throw AXError.actionFailed("element \(try index(args)) is not pressable and has no position")
+        throw AXError.actionFailed(
+            "element \(try index(args)) is not pressable and has no position. "
+            + "Re-fetch get_app_state and pick a different element_index.")
     }
 
     private func centerOf(_ el: AXUIElement) -> CGPoint? {
-        var posRef: CFTypeRef?
-        var sizeRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(el, kAXPositionAttribute as CFString, &posRef) == .success,
-              AXUIElementCopyAttributeValue(el, kAXSizeAttribute as CFString, &sizeRef) == .success,
-              let pv = posRef, let sv = sizeRef,
-              CFGetTypeID(pv) == AXValueGetTypeID(), CFGetTypeID(sv) == AXValueGetTypeID() else { return nil }
-        var p = CGPoint.zero
-        var s = CGSize.zero
-        AXValueGetValue(pv as! AXValue, .cgPoint, &p)
-        AXValueGetValue(sv as! AXValue, .cgSize, &s)
-        guard s.width > 0, s.height > 0 else { return nil }
-        return CGPoint(x: p.x + s.width / 2, y: p.y + s.height / 2)
+        return actions.centerOf(el)
     }
 
     private func doubleValue(_ v: Any?) -> CGFloat? {
@@ -361,14 +501,17 @@ public final class MCPServer {
 
     private func scrollTool(_ args: [String: Any]) throws -> [[String: Any]] {
         let app = try ax.resolveApp(try requireApp(args))
+        let appEl = ax.appElement(app)
         let direction = args["direction"] as? String ?? "down"
         let pages = (args["pages"] as? Double) ?? Double(args["pages"] as? Int ?? 1)
 
+        // Work out where to scroll: explicit coordinates, an element's center, or
+        // the window's center as a last resort.
         var point: CGPoint?
         if let x = doubleValue(args["x"]), let y = doubleValue(args["y"]) {
             point = CGPoint(x: x, y: y)
         } else if let el = try? element(args) {
-            point = centerOf(el)
+            point = actions.centerOf(el)
         } else if let f = ax.windowFrame(app) {
             point = CGPoint(x: f.midX, y: f.midY)
         }
@@ -377,18 +520,21 @@ public final class MCPServer {
         if let el = try? element(args) {
             actions.focus(el)
         }
-        try actions.scroll(x: p.x, y: p.y, direction: direction, pages: pages)
-        return [["type": "text", "text": "Scrolled \(direction) \(pages) page(s) at (\(Int(p.x)), \(Int(p.y)))."]]
+        let r = try actions.scrollSilent(appEl: appEl, pid: app.processIdentifier,
+                                         x: p.x, y: p.y, direction: direction, pages: pages)
+        return [["type": "text", "text": "\(r.detail)\ndelivery=\(r.delivery.rawValue)"]]
     }
 
     private func dragTool(_ args: [String: Any]) throws -> [[String: Any]] {
-        _ = try ax.resolveApp(try requireApp(args))
+        let app = try ax.resolveApp(try requireApp(args))
         guard let fx = doubleValue(args["from_x"]), let fy = doubleValue(args["from_y"]),
               let tx = doubleValue(args["to_x"]), let ty = doubleValue(args["to_y"]) else {
             throw AXError.invalidArgument("from_x, from_y, to_x, to_y are required")
         }
-        try actions.drag(from: CGPoint(x: fx, y: fy), to: CGPoint(x: tx, y: ty))
-        return [["type": "text", "text": "Dragged from (\(Int(fx)), \(Int(fy))) to (\(Int(tx)), \(Int(ty)))."]]
+        let r = try actions.dragSilent(pid: app.processIdentifier,
+                                       from: CGPoint(x: fx, y: fy), to: CGPoint(x: tx, y: ty),
+                                       button: args["mouse_button"] as? String ?? "left")
+        return [["type": "text", "text": "\(r.detail)\ndelivery=\(r.delivery.rawValue)"]]
     }
 
     private func selectText(_ args: [String: Any]) throws -> [[String: Any]] {
@@ -469,6 +615,14 @@ public final class MCPServer {
         "description": "Element index from the most recent get_app_state snapshot",
     ]
 
+    private static let foregroundProp: [String: Any] = [
+        "type": "boolean",
+        "description":
+            "Default false. When false (recommended) the action is delivered silently and the target app "
+            + "is NEVER brought to the front, so the user is not interrupted. Set true only when a silent "
+            + "path genuinely fails and you accept that it will steal focus from whatever the user is doing.",
+    ]
+
     public static let toolDefinitions: [[String: Any]] = [
         [
             "name": "list_apps",
@@ -492,7 +646,11 @@ public final class MCPServer {
         ],
         [
             "name": "click",
-            "description": "Click an element by index, or click pixel coordinates from a screenshot.",
+            "description":
+                "Click an element by index, or click pixel coordinates from a screenshot. "
+                + "Activated through the Accessibility API, so the app is not brought to the front and "
+                + "the user's focus is untouched. Coordinate clicks are resolved to an element via an AX "
+                + "hit test and then pressed.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
@@ -502,6 +660,7 @@ public final class MCPServer {
                     "y": ["type": "number", "description": "Y coordinate in screen points"],
                     "mouse_button": ["type": "string", "enum": ["left", "right", "middle"]],
                     "click_count": ["type": "integer", "description": "Number of clicks. Defaults to 1"],
+                    "allow_foreground": foregroundProp,
                 ],
                 "required": ["app"],
                 "additionalProperties": false,
@@ -510,12 +669,13 @@ public final class MCPServer {
         ],
         [
             "name": "move_mouse",
-            "description": "Move the pointer to screen coordinates without clicking. Use this to HOVER: macOS opens a menu's submenu on hover, whereas clicking the parent item activates it and closes the menu.",
+            "description": "Move the pointer to screen coordinates without clicking. Use this to HOVER: macOS opens a menu's submenu on hover, whereas clicking the parent item activates it and closes the menu. Moving the cursor is inherently visible to the user, so this is the one action that is not silent.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
                     "x": ["type": "number", "description": "X coordinate in screen points"],
                     "y": ["type": "number", "description": "Y coordinate in screen points"],
+                    "allow_foreground": foregroundProp,
                 ],
                 "required": ["x", "y"],
                 "additionalProperties": false,
@@ -550,10 +710,17 @@ public final class MCPServer {
         ],
         [
             "name": "press_key",
-            "description": "Press a key or key combination in an app. Key names follow xdotool syntax, e.g. \"Return\", \"Tab\", \"super+c\", \"Up\".",
+            "description":
+                "Press a key or key combination in an app without bringing it forward. Key names follow "
+                + "xdotool syntax, e.g. \"Return\", \"Tab\", \"up\", \"delete\". Plain keys and shift/option/"
+                + "control combos are delivered reliably to background apps; Command shortcuts frequently "
+                + "are not (macOS routes them through the menu bar), and the result says so when that happens.",
             "inputSchema": [
                 "type": "object",
-                "properties": ["app": appProp, "key": ["type": "string"]],
+                "properties": [
+                    "app": appProp, "key": ["type": "string"],
+                    "allow_foreground": foregroundProp,
+                ],
                 "required": ["app", "key"],
                 "additionalProperties": false,
             ],
@@ -561,10 +728,14 @@ public final class MCPServer {
         ],
         [
             "name": "type_text",
-            "description": "Type text into the focused element of an app. Prefer set_value or paste for form fields; note that \\n may submit rather than insert a newline.",
+            "description":
+                "Type text into an app without bringing it forward and without touching the clipboard. "
+                + "Unicode/CJK-safe. Optionally pass element_index to place keyboard focus on a specific "
+                + "field first (an in-app focus change; the app still does not come forward). Prefer "
+                + "set_value for form fields. Note that \\n submits rather than inserting a newline.",
             "inputSchema": [
                 "type": "object",
-                "properties": ["app": appProp, "text": ["type": "string"]],
+                "properties": ["app": appProp, "text": ["type": "string"], "element_index": indexProp],
                 "required": ["app", "text"],
                 "additionalProperties": false,
             ],
@@ -572,7 +743,9 @@ public final class MCPServer {
         ],
         [
             "name": "scroll",
-            "description": "Scroll an element or coordinate region in a direction.",
+            "description":
+                "Scroll a region in a direction, silently, by driving the scroll bar through the "
+                + "Accessibility API. The app is not brought to the front.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
@@ -580,6 +753,7 @@ public final class MCPServer {
                     "x": ["type": "number"], "y": ["type": "number"],
                     "direction": ["type": "string", "enum": ["up", "down", "left", "right"]],
                     "pages": ["type": "number", "description": "Number of pages. Defaults to 1"],
+                    "allow_foreground": foregroundProp,
                 ],
                 "required": ["app", "direction"],
                 "additionalProperties": false,
@@ -588,13 +762,17 @@ public final class MCPServer {
         ],
         [
             "name": "drag",
-            "description": "Drag from one screen coordinate to another.",
+            "description":
+                "Drag from one screen coordinate to another. Delivered directly to the target process, "
+                + "so the app is not brought to the front.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
                     "app": appProp,
                     "from_x": ["type": "number"], "from_y": ["type": "number"],
                     "to_x": ["type": "number"], "to_y": ["type": "number"],
+                    "mouse_button": ["type": "string", "enum": ["left", "right", "middle"]],
+                    "allow_foreground": foregroundProp,
                 ],
                 "required": ["app", "from_x", "from_y", "to_x", "to_y"],
                 "additionalProperties": false,
@@ -614,14 +792,45 @@ public final class MCPServer {
         ],
         [
             "name": "clipboard_copy",
-            "description": "Send copy (Cmd+C) to an app and return the resulting clipboard text. Useful for reading text that the accessibility tree does not expose.",
+            "description":
+                "Read an app's current text selection. Despite the name it does NOT use the clipboard or "
+                + "send Cmd+C: it reads the selection through the Accessibility API, so it cannot disturb "
+                + "the user's pasteboard and does not bring the app forward. Returns an explanation if no "
+                + "selection is exposed.",
+            "inputSchema": [
+                "type": "object",
+                "properties": ["app": appProp, "element_index": indexProp],
+                "required": ["app"],
+                "additionalProperties": false,
+            ],
+            "annotations": ["readOnlyHint": true, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false],
+        ],
+        [
+            "name": "start_live_view",
+            "description":
+                "Start a live video stream of an app's window for the Computer Use panel. "
+                + "The window is captured with ScreenCaptureKit WITHOUT being brought to the front, so "
+                + "the user is not interrupted. Prefer this when you want to watch an app continuously "
+                + "rather than sampling stills with get_app_state.",
             "inputSchema": [
                 "type": "object",
                 "properties": ["app": appProp],
                 "required": ["app"],
                 "additionalProperties": false,
             ],
-            "annotations": ["readOnlyHint": true, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false],
+            "annotations": ["readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false],
+        ],
+        [
+            "name": "stop_live_view",
+            "description": "Stop the live video stream and release the capture session.",
+            "inputSchema": ["type": "object", "properties": [:], "additionalProperties": false],
+            "annotations": ["readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false],
+        ],
+        [
+            "name": "live_view_status",
+            "description": "Report live view statistics: streaming state, frame count, fps, connected viewers and the MJPEG URL.",
+            "inputSchema": ["type": "object", "properties": [:], "additionalProperties": false],
+            "annotations": ["readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false],
         ],
     ]
 }

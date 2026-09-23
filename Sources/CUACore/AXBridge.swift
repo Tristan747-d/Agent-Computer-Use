@@ -270,19 +270,37 @@ public final class AXBridge {
     }
 
     /// The app's key/main window element, falling back to the app element itself.
+    ///
+    /// Ordering matters for **background** apps: `AXFocusedWindow` describes the
+    /// user's focus and is usually empty for an app sitting behind another one,
+    /// while `AXWindows[0]` is populated regardless. We therefore try the window
+    /// list before giving up.
     public func keyWindowElement(_ app: NSRunningApplication) -> AXUIElement {
         let appEl = appElement(app)
         if let w = attribute(appEl, kAXFocusedWindowAttribute as String),
            CFGetTypeID(w) == AXUIElementGetTypeID() {
             return w as! AXUIElement
         }
+        if let v = attribute(appEl, kAXWindowsAttribute as String), let arr = v as? [AXUIElement],
+           let first = arr.first {
+            return first
+        }
         if let w = attribute(appEl, kAXMainWindowAttribute as String),
            CFGetTypeID(w) == AXUIElementGetTypeID() {
             return w as! AXUIElement
         }
+        return appEl
+    }
+
+    /// A root suitable for searching an app's whole tree, preferring a real window.
+    public func attributeTreeRoot(_ appEl: AXUIElement) -> AXUIElement? {
         if let v = attribute(appEl, kAXWindowsAttribute as String), let arr = v as? [AXUIElement],
            let first = arr.first {
             return first
+        }
+        if let w = attribute(appEl, kAXFocusedWindowAttribute as String),
+           CFGetTypeID(w) == AXUIElementGetTypeID() {
+            return w as! AXUIElement
         }
         return appEl
     }
