@@ -27,10 +27,11 @@ whenToUse: 需要点击/输入/读取某个 Mac app 的界面时；或用户让�
 | `mcp__computer__start_live_view` | ✅ | 开启目标窗口**实时视频**（10fps MJPEG，不抢前台） |
 | `mcp__computer__stop_live_view` | ✅ | 停止实时视频 |
 | `mcp__computer__live_view_status` | ✅ | 查询实时视频状态与流地址 |
+| `mcp__computer__probe_app` | ✅ | 先探测这个 app 是什么框架、多少节点、属于哪一层（**拉全树之前先调这个**） |
 
 `app` 参数可用**显示名、完整路径或 bundle id**。app 没运行时会自动后台拉起。
 
-## 静默铁律（v2.0 起）
+## 静默铁律（v2.0 起，v3.0 实测覆盖 Electron 与 WebUI）
 
 **所有动作默认静默**：直投目标进程（AX API / `CGEvent.postToPid`），**绝不把 app 抢到前台**，
 用户的前台、焦点、光标、剪贴板都不受影响。想看画面就开 `start_live_view`（实时视频，
@@ -77,20 +78,29 @@ mcp__computer__set_value({ app: "TextEdit", element_index: 2, value: "hello" })
 mcp__computer__get_app_state({ app: "TextEdit" })
 ```
 
-## 非原生 app 降级阶梯（实测：macOS 27）
+## 先 probe，再决定怎么开
 
-看 `get_app_state` 返回判断层级——AXWebArea 有无、AXGroup/AXStaticText 数量、
-窗口 frame 是否存在：
+**别猜，先问一次。** `probe_app` 一次调用就告诉你这个 app 是什么框架、
+有多少节点、属于哪一层、该怎么开。比直接拉全树便宜得多。
 
-| 层级 | 特征（实测数据） | 策略 |
+**层级是按树的内容判定的，不是按框架猜的。** 旧版按"是不是 Electron"猜，
+结论是错的：Electron 和 WebUI 恰恰是树最丰富的那类。
+
+| 层级 | 判定依据 | 策略 |
 |---|---|---|
-| L1 树完整 | AppKit 原生（Finder 631 节点）；已开 a11y 的 Electron（QQ 1936 节点） | 正常走 element_index |
-| L2 树浅但有窗口 | 未开 a11y 的 Electron（Notion ~400 节点）；WKWebView（微信 213 节点、AXWebArea=0，但 5 个 AXWindow、163 个 AXMenuItem） | 拿窗口 frame → 坐标点击 + type_text；结构化操作走**菜单栏**（永远可靠） |
-| L3 连窗口都没有 | 个别自研 app（实测窗口数为 0） | 只剩菜单+键盘盲走。如实告知用户，不要空转 |
+| `L1_full_tree` | 控件 ≥ 12 且节点 ≥ 60，或有 AXWebArea 且可见文本 ≥ 400 字符 | 正常走 element_index + AXPress |
+| `L2_shallow_tree` | 树浅，但窗口服务器看得见窗口 | 坐标点击；结构化操作走**菜单栏**（永远可靠） |
+| `L3_no_windows` | AX 和窗口服务器都没有窗口 | 菜单 + 键盘盲走。如实告知用户，不要空转 |
 
-- `AXManualAccessibility` / `AXEnhancedUserInterface` 解锁开关**不可依赖**：
-  实测对 Notion 设置成功但树不增长，对微信返回 -25205/-25208。
-  试一次，两次调用内没效果就立刻放弃转 L2。
+`get_app_state` 头部也会打出 `Framework:` 和 `Strategy tier:`，同一套判定。
+
+- **Chromium 的树是懒加载的**：`probe_app` / `get_app_state` 遇到 Electron/Chromium
+  且树很浅时会自动请求无障碍模式（`AXEnhancedUserInterface` +
+  `AXManualAccessibility`）再重测，并在报告里写明树有没有变大。
+  报告说"did not grow"就别再试了，直接按 L2 走。
+- **AX 报 0 窗口不等于没有窗口**：有的 app（DSH Launcher 就是一个）
+  `AXWindows` 是空的，但整棵树在 focused window 属性下。两个来源都看，
+  别因为一次 0 就放弃。
 - 无画面时坐标按窗口 frame 相对位置估算，点完必须 get_app_state 验证。
 - 连续 3 次操作验证失败才向上求助，并附上已试坐标和现象。
 

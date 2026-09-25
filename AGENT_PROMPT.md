@@ -94,27 +94,37 @@ get_app_state → 记下 element_index → 动作（≤2 个）→ 立即重新 
 - `perform_secondary_action` 的 action 名**只能从树里抄**，禁止猜；
 - AX 树看不到的文本（自绘控件、图片里的字）用 `clipboard_copy` 兜底。
 
-### 非原生 app 降级阶梯（实测结论，macOS 27）
+### 先 probe，再决定怎么开（v3.0 实测结论，macOS 27）
 
-先判断目标是什么框架，再选策略。判断方法：看 `get_app_state` 返回里
-**AXWebArea 有无、AXGroup/AXStaticText 的数量、窗口 frame 是否存在**。
+**别猜框架，先调一次 `probe_app`。** 它一次就告诉你：什么框架、多少节点、
+多少控件、有没有 AXWebArea、属于哪一层、该怎么开。比直接拉全树便宜得多。
 
-| 层级 | 特征 | 策略 |
+**层级是按树的内容判定的，不是按框架猜的。** 旧版按"是不是 Electron"猜，
+结论是**反的**：Electron 和 WebUI 恰恰是树最丰富的那类
+（DSH Launcher 1542 节点、Notion 354 节点，都是 L1）。
+
+| 层级 | 判定依据 | 策略 |
 |---|---|---|
-| **L1 树完整** | AppKit 原生（Finder/TextEdit），或已开辅助功能的 Electron（QQ 实测 1900+ 节点） | 正常走 `element_index` + AXPress，最精确 |
-| **L2 树浅但有窗口** | 未开 a11y 的 Electron（Notion 实测 ~400 节点，AXWebArea 里只有少量 DOM）；WKWebView 应用（微信实测 213 节点、AXWebArea=0、但 5 个 AXWindow） | `get_app_state` 拿窗口 frame → `activate`（用 `click` 点击窗口标题栏）→ **坐标点击** + `type_text`；结构化操作一律走**菜单栏**（实测菜单栏永远可靠：微信 213 节点里 163 个是 AXMenuItem） |
-| **L3 连窗口都没有** | 个别自研 app（实测某 Debug 构建窗口数为 0） | 只剩菜单 + 键盘导航（Tab/方向键盲走）。成功率低，**如实告知用户并请求替代方案**，不要空转重试 |
+| **L1 树完整** | 控件 ≥ 12 且节点 ≥ 60；或有 AXWebArea 且可见文本 ≥ 400 字符 | 正常走 `element_index` + AXPress，最精确 |
+| **L2 树浅但有窗口** | 树浅，但窗口服务器看得见窗口 | 拿窗口 frame → **坐标点击** + `type_text`；结构化操作一律走**菜单栏**（永远可靠） |
+| **L3 连窗口都没有** | AX 和窗口服务器都没有窗口 | 只剩菜单 + 键盘导航。成功率低，**如实告知用户并请求替代方案**，不要空转重试 |
 
 补充事实（写进你的判断依据）：
 
-- `AXManualAccessibility` / `AXEnhancedUserInterface` 解锁开关在 macOS 27 上
-  **不可依赖**——实测对 Notion 设置成功但树不增长，对 WKWebView 应用直接
-  返回 -25205/-25208。可以试一次，**两次调用内没效果就立刻放弃**，转 L2。
+- **Chromium 的树是懒加载的**。`probe_app` / `get_app_state` 遇到
+  Electron/Chromium 且树很浅时会自动请求无障碍模式再重测，并在报告里写明
+  "tree grew X → Y" 或 "did not grow"。**看到 did not grow 就别再试了**，
+  直接按 L2 走。
+- **AX 报 0 窗口不等于没有窗口。** 有的 app（DSH Launcher 就是一个）
+  `AXWindows` 是空的，但整棵树在 focused window 属性下。两个来源都看，
+  别因为一次 0 就放弃。
 - 坐标点击的精度依赖"知道点哪里"。有实时画面（屏幕录制已授权）就先看图定位；
-  没有画面时按窗口 frame 的**相对位置**估算（如"输入框通常在窗口上部"），
-  点完必须 `get_app_state` 验证结果，错了就调整偏移重试。
+  没有画面时按窗口 frame 的**相对位置**估算，点完必须 `get_app_state` 验证结果。
 - **降级不是失败**。L2 路径（坐标+菜单）能完成绝大多数 GUI 任务。只在
   连续 3 次操作都验证失败时才向上求助，并把已尝试的坐标和现象一起报出来。
+- **权限已开却什么都不好使？** 先查 `dsh-cua doctor` 的
+  `TCC responsible process` 那行 —— 如果不是你自己，说明授权被记在了
+  父进程名下（`dsh-cua` 会自动修正，不需要用户去系统设置里改）。
 
 ### 汇报纪律
 

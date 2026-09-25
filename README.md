@@ -225,6 +225,25 @@ dsh-cua ──写入──> ~/.dsh-cua/<pid>.json + viewport.png
 
 ### 版本记录
 
+**v3.0** —— 攻破 Electron 与 WebUI
+
+- **根因是 TCC 归因，不是框架。** `dsh-cua` 由 DSH Launcher 拉起，macOS 把
+  整条进程树的无障碍授权记在**父进程**名下，而 Launcher 的 TCC 行是 denied，
+  于是 AX 全废 —— 表现是"系统设置里权限已开，但每个 app 都只返回 1 个
+  Unknown 元素"。修复：`TCCResponsibility.reexecIfNeeded()` 用
+  `responsibility_spawnattrs_setdisclaim` 以自身为责任进程重跑。
+  **不需要**去系统设置里给 Launcher 打开关。
+- **`probe_app` 工具**：拉全树之前先花一次调用问清楚框架、节点数、层级。
+- **层级改为按树内容判定**（控件数 / 节点数 / AXWebArea / 可见文本），
+  不再按"是不是 Electron"猜 —— 旧的猜测结论是反的。
+- **`AppFramework.requestChromiumAccessibility()`**：Chromium 的树是懒加载的，
+  自动请求无障碍模式再重测，并把"树有没有变大"如实写进报告。
+- **`measure` 与 `get_app_state` 统一**：`AXWindows` 为空时回落到
+  focused/main window。此前两个工具对同一个 app 给出互相矛盾的结论。
+- **`onScreenWindowCount()`**：区分"没有窗口"与"有窗口但无 AX"。
+- 新增 `dsh-cua verify <app>`（端到端自检）和 `dsh-cua responsibility`，
+  `doctor` 增加 `TCC responsible process` / `Self-responsible` 两行。
+
 **v2.1** —— 实时视频
 
 - **面板里的实时视频。** `start_live_view` / `stop_live_view` / `live_view_status`
@@ -259,17 +278,49 @@ dsh-cua ──写入──> ~/.dsh-cua/<pid>.json + viewport.png
   但点击父级菜单项是"激活并关闭"它 —— 下钻嵌套菜单只有悬停这一条路。
 - **`AGENT_PROMPT.md`。** 给任意 agent 的自包含简报：能力、启用方式、操作纪律。
   可作为首条消息粘贴，也可作为 skill 上下文注入。
-- **实测的降级阶梯**（在 `skill/SKILL.md` 里），用于 AX 树很浅或缺失的 app，
-  已在 macOS 27 上验证：
+- **按树内容判定的策略层级**（不是按框架猜的）。`probe_app` 先告诉你这个 app
+  属于哪一层，再决定怎么开：
 
-  | 层级 | 实测例子 | 策略 |
+  | 层级 | 判定依据 | 策略 |
   |---|---|---|
-  | 完整树 | Finder（631 节点）、QQ（1936） | 正常走 `element_index` |
-  | 树很浅但窗口可见 | Notion（约 400）、微信（213 节点、0 个 AXWebArea，但有 5 个窗口 + 163 个菜单项） | 坐标 + **菜单栏**（永远可靠） |
-  | 完全没有窗口 | 测过一个 debug 构建 | 菜单 + 盲打键盘导航；不如直接问用户，别空转 |
+  | `L1_full_tree` | 控件 ≥ 12 且节点 ≥ 60，或有 AXWebArea 且可见文本 ≥ 400 字符 | 正常走 `element_index` + `AXPress` |
+  | `L2_shallow_tree` | 树浅，但窗口服务器看得见窗口 | 坐标点击 + **菜单栏**（永远可靠） |
+  | `L3_no_windows` | 两个来源都没有窗口 | 菜单 + 盲打键盘导航；不如直接问用户，别空转 |
 
-  macOS 27 实测：`AXManualAccessibility` 在 Notion 上设置成功但树不会变多；
-  微信则两个解锁开关都拒绝（-25205）。永远别依赖它们 —— 试一次，立刻回退。
+  **为什么改成按内容判定。** 旧版按"这是不是 Electron"来猜层级，结论是错的：
+  Electron 和 WebUI 恰恰是树最丰富的那类（DSH Launcher 1542 节点、
+  Notion 354 节点）。真正决定可驱动性的是树里有什么，不是 app 用什么写的。
+
+- **`probe_app` 工具**：先花一次调用问清楚"这是什么 app、能不能用 element_index",
+  再决定要不要用 `get_app_state` 花大价钱拉全树。
+
+  **v3.0 实测**（macOS 27，全部静默：前台 app 全程不变，`AXPress` 投递到目标进程）：
+
+  | App | 框架 | 节点 | 层级 | AXPress 真实控件 |
+  |---|---|---|---|---|
+  | DSH Launcher | WebKit / WKWebView | 1542 | L1 | 新建会话 |
+  | Notion | Electron | 354 | L1 | 关闭侧边栏 |
+  | Canva | Electron | 192 | L1 | 首页标签 |
+  | GenOffice | Electron | 181 | L1 | 新建标签页 |
+  | WorkBuddy AI | Electron | 175 | L1 | Collapse sidebar |
+  | QQ | 原生 AppKit | 126 | L1 | 关闭图片查看器 |
+  | Finder | 原生 AppKit | 26 | L2 | — |
+
+  一条命令可复现：`dsh-cua verify <app>`。
+
+- **权限已开却什么都不好使？先查 TCC 归因。** `dsh-cua doctor` 会打出
+  `TCC responsible process`。如果那行不是你自己（比如显示 DSH Launcher），
+  说明授权被记在了父进程名下 —— 这时 `dsh-cua` 会自动以自身为责任进程重跑，
+  无需你去系统设置里加 Launcher。
+
+**v3.0** —— 攻破 Electron 与 WebUI。根因不在框架，在 TCC 归因：
+`dsh-cua` 由 DSH Launcher 拉起，macOS 把整条进程树的无障碍授权记在
+**父进程**名下，而 Launcher 自己的 TCC 行是 denied，于是 AX 全废
+（表现是"权限已开但每个 app 都只有 1 个 Unknown 元素"）。
+修复是 `TCCResponsibility.reexecIfNeeded()`：用
+`responsibility_spawnattrs_setdisclaim` 以自身为责任进程重跑一遍。
+配套新增 `dsh-cua doctor` 的 `TCC responsible process` / `Self-responsible`
+两行，以及 `dsh-cua responsibility`、`dsh-cua verify <app>` 两个子命令。
 
 **v0.1** —— 首发：11 个工具、签名 `.app` 打包、实时侧边栏面板、
 按进程的状态文件、agent skill。
