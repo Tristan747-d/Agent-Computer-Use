@@ -1,31 +1,71 @@
-# DSH Computer Use
+# Agent Computer Use
 
-**Self-built macOS Computer Use for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) — no Codex, no OpenAI, no vendor service.**
+**Silent Computer Use for macOS — one binary that plugs into whichever agent you
+run (DSH / OpenClaw / Hermes).**
 
-Give your DSH agent eyes and hands on your Mac: it reads any app's accessibility
-tree, clicks, types, scrolls, and drags — and you watch it happen in a live
-sidebar panel inside DSH.
-
-> 中文版（Chinese version）：[README.md](README.md)
+Pure Accessibility API + CoreGraphics. No Codex, no OpenAI, no vendor service.
+The defining property is **silence**: actions are delivered straight to the
+target process and **never bring an app to the front**, so they never interrupt
+what you are doing.
 
 ```
-┌─────────────────────────────────────────────┐
-│ ● Computer Use                    [暂停][刷新] │
-│   运行中                                      │
-├─────────────────────────────────────────────┤
-│                                             │
-│         < live window frame >      1470×923 │
-│                                             │
-├─────────────────────────────────────────────┤
-│ 目标 app: Finder          元素: 235          │
-│ 窗口: 1470×923            更新于: 13:07:42   │
-│ 最近动作                                     │
-│   13:07:42  读取 Finder 的界面状态            │
-│   13:07:40  列出运行中的 app                  │
-└─────────────────────────────────────────────┘
+┌─────────────────────────────────────────┐
+│ Your agent (DSH / OpenClaw / Hermes)     │
+└───────────────┬─────────────────────────┘
+                │ MCP over stdio
+┌───────────────▼─────────────────────────┐
+│  Agent Computer Use (signed .app)        │
+│  16 tools · AX tree · screenshots · live │
+└───────────────┬─────────────────────────┘
+                │ delivered to process (never foregrounded)
+┌───────────────▼─────────────────────────┐
+│  Any macOS app: Electron / WebUI / native│
+└─────────────────────────────────────────┘
 ```
+
+> 中文版: [README.md](README.md)
 
 ---
+
+## Install
+
+```sh
+git clone https://github.com/Tristan747-d/Agent-Computer-Use.git
+cd Agent-Computer-Use
+./install.sh                              # every host found on this machine
+./install.sh --host dsh                   # or just one
+./install.sh --host openclaw --host hermes
+```
+
+`install.sh` builds the signed `.app`, writes MCP config per host, installs the
+skill, then runs `doctor` to prove it. Hosts that are not installed are
+**skipped**, not failed.
+
+### Tool names per host
+
+One binary, three naming conventions — these belong to the hosts, not to us:
+
+| Host | Tool name | Config |
+|---|---|---|
+| DSH | `mcp__computer__<tool>` | `~/.dsh/` + panel symlink |
+| OpenClaw | `mcp__…` (match the `<tool>` suffix) | `~/.openclaw/openclaw.json` |
+| Hermes | `dsh-computer-use:<tool>` | `~/.hermes/config.yaml` |
+
+16 tools: `list_apps`, `probe_app`, `get_app_state`, `click`, `set_value`,
+`select_text`, `press_key`, `type_text`, `scroll`, `drag`, `move_mouse`,
+`perform_secondary_action`, `clipboard_copy`, `start_live_view`,
+`stop_live_view`, `live_view_status`.
+
+### About the rename
+
+Formerly **DSH Computer Use**. The **bundle id stays
+`com.tristan.dsh.computeruse`** on purpose: macOS TCC records grants by bundle
+identity (the designated requirement pins
+`identifier "com.tristan.dsh.computeruse"`), so changing it would silently
+revoke every user's Accessibility and Screen Recording grant and force manual
+re-authorization. Backward compatibility is provided by a `dsh-cua.app` alias
+pointing at the real bundle — not a second copy, since two bundles with one id
+make LaunchServices resolution ambiguous and quietly break Screen Recording.
 
 ## For Customers
 

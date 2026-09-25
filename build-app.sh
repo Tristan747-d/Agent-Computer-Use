@@ -1,5 +1,12 @@
 #!/bin/bash
-# Build dsh-cua into a signed .app bundle.
+# Build Agent Computer Use into a signed .app bundle.
+#
+# Naming note: the product is "Agent Computer Use" but the *bundle id* is
+# deliberately still the legacy com.tristan.dsh.computeruse. macOS TCC keys
+# Accessibility and Screen Recording grants by bundle identity (see the
+# designated requirement), so changing it would revoke every existing grant and
+# force users to re-authorize by hand. Renaming the app while keeping its
+# identity is what makes the rename backward compatible.
 #
 # Why a .app and a real certificate (not ad-hoc): TCC records the code-signing
 # requirement. Ad-hoc binds the CDHash, so every rebuild invalidates the
@@ -11,16 +18,20 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
-APP_NAME="dsh-cua"
-BUNDLE_ID="com.tristan.dsh.computeruse"
+# The bundle/display name is human-facing and contains a space; the executable
+# name must not (it is a POSIX binary name and appears in every host config).
+APP_NAME="Agent Computer Use"
+EXE_NAME="agent-cua"
+# Legacy id on purpose — see the naming note above.
+BUNDLE_ID="${ACU_BUNDLE_ID:-com.tristan.dsh.computeruse}"
 # Assemble OFF iCloud Drive. This project lives under a fileprovider-managed
 # path, and iCloud re-applies com.apple.FinderInfo to items it indexes —
 # reattaching the "detritus" xattr between `xattr -cr` and `codesign`, which
 # makes signing fail every time. /tmp is not fileprovider-managed.
-STAGE_DIR="$(mktemp -d /tmp/dsh-cua-build.XXXXXX)"
+STAGE_DIR="$(mktemp -d /tmp/agent-cua-build.XXXXXX)"
 BUNDLE="${STAGE_DIR}/${APP_NAME}.app"
 INSTALL_DIR="${HOME}/Applications"
-SIGN_ID="${DSH_CUA_SIGN_ID:-127DF7DB6EF964270A527F4E9B0A2CAD32EBD2A5}"
+SIGN_ID="${ACU_SIGN_ID:-127DF7DB6EF964270A527F4E9B0A2CAD32EBD2A5}"
 trap 'rm -rf "${STAGE_DIR}"' EXIT
 
 echo "==> Building release binaries"
@@ -31,8 +42,8 @@ echo "==> Assembling ${BUNDLE}"
 mkdir -p "${BUNDLE}/Contents/MacOS"
 mkdir -p "${BUNDLE}/Contents/Resources"
 
-cp "${PROJECT_DIR}/.build/release/${APP_NAME}" "${BUNDLE}/Contents/MacOS/${APP_NAME}"
-chmod +x "${BUNDLE}/Contents/MacOS/${APP_NAME}"
+cp "${PROJECT_DIR}/.build/release/${EXE_NAME}" "${BUNDLE}/Contents/MacOS/${EXE_NAME}"
+chmod +x "${BUNDLE}/Contents/MacOS/${EXE_NAME}"
 
 # Info.plist MUST be XML (a JSON plist makes codesign report a misleading
 # "does not satisfy its Designated Requirement", and the app dies at launch).
@@ -100,6 +111,19 @@ if [[ "${1:-}" == "--install" ]]; then
   rm -rf "${INSTALL_DIR}/${APP_NAME}.app"
   cp -R "${BUNDLE}" "${INSTALL_DIR}/${APP_NAME}.app"
 
+  # Backward compatibility: the binary used to live at
+  # ~/Applications/dsh-cua.app/Contents/MacOS/dsh-cua, and every existing host
+  # config (DSH, OpenClaw, Hermes) points at that literal path. A symlink keeps
+  # those working instead of breaking each one on rename.
+  #
+  # Why the symlink is a *directory* alias rather than a second bundle: two
+  # bundles with the same id would make LaunchServices resolution ambiguous and
+  # silently break the Screen Recording grant. One real bundle, one alias.
+  rm -rf "${INSTALL_DIR}/dsh-cua.app"
+  ln -s "${INSTALL_DIR}/${APP_NAME}.app" "${INSTALL_DIR}/dsh-cua.app"
+  ln -sf "${EXE_NAME}" "${INSTALL_DIR}/${APP_NAME}.app/Contents/MacOS/dsh-cua"
+  echo "==> Compatibility alias: ${INSTALL_DIR}/dsh-cua.app -> ${APP_NAME}.app"
+
   # Exactly ONE copy of this bundle id may exist. LaunchServices and TCC
   # resolve a bundle id to a single registered location; leftover build copies
   # under the project directory make that resolution ambiguous and a Screen
@@ -120,9 +144,9 @@ if [[ "${1:-}" == "--install" ]]; then
       -f "${INSTALL_DIR}/${APP_NAME}.app" 2>/dev/null || true
 
   echo "Installed. Verify with:"
-  echo "  ${INSTALL_DIR}/${APP_NAME}.app/Contents/MacOS/${APP_NAME} doctor"
+  echo "  ${INSTALL_DIR}/${APP_NAME}.app/Contents/MacOS/${EXE_NAME} doctor"
 fi
 
 echo
 echo "Done: ${BUNDLE}"
-echo "Run doctor: ${BUNDLE}/Contents/MacOS/${APP_NAME} doctor"
+echo "Run doctor: ${BUNDLE}/Contents/MacOS/${EXE_NAME} doctor"

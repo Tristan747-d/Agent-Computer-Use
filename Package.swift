@@ -2,7 +2,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "dsh-cua",
+    name: "agent-cua",
     platforms: [.macOS(.v14)],
     targets: [
         .target(
@@ -10,7 +10,7 @@ let package = Package(
             path: "Sources/CUACore"
         ),
         .executableTarget(
-            name: "dsh-cua",
+            name: "agent-cua",
             dependencies: ["CUACore"],
             path: "Sources/dsh-cua"
         ),
