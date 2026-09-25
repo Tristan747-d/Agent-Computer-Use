@@ -261,18 +261,47 @@ dsh-cua ──writes──> ~/.dsh-cua/<pid>.json + viewport.png
 - **`AGENT_PROMPT.md`.** A self-contained briefing for any agent:
   capabilities, enablement, and operating discipline. Paste it as a first
   message or inject it as skill context.
-- **Measured degradation ladder** (in `skill/SKILL.md`) for apps whose AX
-  tree is shallow or absent, verified on macOS 27:
+- **Strategy tiers decided by tree content, not by framework.** `probe_app`
+  tells you which tier an app is in before you decide how to drive it:
 
-  | Tier | Measured example | Strategy |
+  | Tier | Decided by | Strategy |
   |---|---|---|
-  | Full tree | Finder (631 nodes), QQ (1936) | Normal `element_index` flow |
-  | Shallow tree, windows visible | Notion (~400), WeChat (213 nodes, 0 AXWebArea, but 5 windows + 163 menu items) | Coordinates + **menu bar** (always reliable) |
-  | No windows at all | One debug build tested | Menus + blind keyboard nav; ask the user rather than spin |
+  | `L1_full_tree` | ≥12 controls and ≥60 nodes, or an AXWebArea with ≥400 chars of visible text | Normal `element_index` + `AXPress` |
+  | `L2_shallow_tree` | Thin tree, but the window server sees a window | Coordinates + **menu bar** (always reliable) |
+  | `L3_no_windows` | No window from either source | Menus + blind keyboard nav; ask the user rather than spin |
 
-  Measured on macOS 27: `AXManualAccessibility` set succeeds on Notion but
-  the tree does not grow; WeChat rejects both unlock switches (-25205).
-  Never depend on them — try once, fall back immediately.
+  **Why content and not framework.** The earlier ladder guessed from "is this
+  Electron", and the guess was backwards: Electron and WebUI surfaces are the
+  *richest* trees here (DSH Launcher 1542 nodes, Notion 354). What decides
+  drivability is what is in the tree, not what the app was written in.
+
+- **`probe_app` tool.** One cheap call answers "what is this app, and can I use
+  `element_index` on it?" before you spend a full `get_app_state`.
+
+**v3.0** — Electron and WebUI broken through. The root cause was never the
+framework; it was TCC attribution. `dsh-cua` is spawned by DSH Launcher, and
+macOS records the whole process tree's Accessibility grant against the
+**parent**, whose own TCC row was `denied` — so AX was dead everywhere (it
+looked like "permission is on but every app returns one `Unknown` element").
+The fix is `TCCResponsibility.reexecIfNeeded()`, which re-execs via
+`responsibility_spawnattrs_setdisclaim` so the process is its own responsible
+process. Adds `TCC responsible process` / `Self-responsible` to
+`dsh-cua doctor`, plus `dsh-cua responsibility` and `dsh-cua verify <app>`.
+
+  **Measured (macOS 27; all silent — frontmost app never changed, `AXPress`
+  delivered straight to the target process):**
+
+  | App | Framework | Nodes | Tier | Control pressed |
+  |---|---|---|---|---|
+  | DSH Launcher | WebKit / WKWebView | 1542 | L1 | 新建会话 |
+  | Notion | Electron | 354 | L1 | 关闭侧边栏 |
+  | Canva | Electron | 192 | L1 | 首页标签 |
+  | GenOffice | Electron | 181 | L1 | 新建标签页 |
+  | WorkBuddy AI | Electron | 175 | L1 | Collapse sidebar |
+  | QQ | Native AppKit | 126 | L1 | 关闭图片查看器 |
+  | Finder | Native AppKit | 26 | L2 | — |
+
+  Reproduce with one command: `dsh-cua verify <app>`.
 
 **v0.1** — initial release: 11 tools, signed `.app` packaging, live sidebar
 panel, per-process state files, agent skill.
