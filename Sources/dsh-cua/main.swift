@@ -6,12 +6,26 @@ import CUACore
 // dsh-cua: MCP server exposing macOS Computer Use to DSH.
 //
 // Usage:
-//   dsh-cua mcp           Run as an MCP server over stdio (how DSH launches it)
-//   dsh-cua doctor        Print permission and environment diagnostics
-//   dsh-cua request-perms Trigger the Accessibility permission prompt
+//   dsh-cua mcp              Run as an MCP server over stdio (how DSH launches it)
+//   dsh-cua doctor           Print permission and environment diagnostics
+//   dsh-cua request-perms    Trigger the Accessibility permission prompt
+//   dsh-cua responsibility   Show which process TCC blames for our permissions
+//
+// `--no-reexec` disables the TCC self-disclaim re-exec, for diagnosing the
+// attribution problem itself (see TCCResponsibility.swift).
 
 let args = Array(CommandLine.arguments.dropFirst())
 let command = args.first ?? "mcp"
+let noReexec = args.contains("--no-reexec")
+
+// DSH runs this server as a child of the DSH desktop shell. macOS attributes
+// Accessibility and Screen Recording to the *responsible process* — the shell —
+// not to this binary, so our own grant is ignored and every AX call fails with
+// -25211 no matter how often the user toggles our switch. Re-exec with the
+// responsibility disclaimed so grants are judged against our own identity.
+if !noReexec, let exitStatus = TCCResponsibility.reexecIfNeeded() {
+    exit(exitStatus)
+}
 
 switch command {
 case "mcp":
@@ -27,6 +41,9 @@ case "doctor":
     print("Screen Recording permission  : \(srOK ? "GRANTED" : "NOT GRANTED")")
     print("Bundle identifier (host app) : \(Bundle.main.bundleIdentifier ?? "<none — running as bare binary>")")
     print("Executable                   : \(Bundle.main.executablePath ?? "?")")
+    // Who TCC thinks we are decides whether the two lines above mean anything.
+    print("TCC responsible process      : \(TCCResponsibility.describeAttribution())")
+    print("Self-responsible             : \(TCCResponsibility.isSelfResponsible() ? "yes" : "no")")
     let cache = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Caches/dsh-cua").path
     print("Screenshot cache             : \(cache)")
@@ -34,6 +51,15 @@ case "doctor":
         print("")
         print("Accessibility is required for every tool. Grant it in:")
         print("  System Settings > Privacy & Security > Accessibility")
+        let r = TCCResponsibility.responsiblePid()
+        if r > 0 && r != getpid() {
+            print("")
+            print("⚠️  This process INHERITED its TCC attribution from another app:")
+            print("      \(TCCResponsibility.executablePath(of: r))")
+            print("    macOS judges permissions by that app, NOT by \(Bundle.main.bundleIdentifier ?? "this app").")
+            print("    Grant Accessibility to THAT app, or run without --no-reexec so dsh-cua")
+            print("    can disclaim the attribution and be judged on its own grant.")
+        }
     }
     if !srOK {
         print("")
@@ -42,6 +68,30 @@ case "doctor":
         print("Add this exact app: \(Bundle.main.bundlePath)")
         print("If it is already listed, toggle it OFF then ON — macOS caches the")
         print("decision per code-signing identity, and a rebuilt binary looks new.")
+    }
+
+case "verify":
+    // End-to-end proof that an Electron / WebUI surface is drivable, run from
+    // inside this signed bundle so TCC actually applies to us.
+    guard let target = args.dropFirst().first(where: { !$0.hasPrefix("--") }) else {
+        FileHandle.standardError.write("usage: dsh-cua verify <app> [--no-click]\n".data(using: .utf8)!)
+        exit(2)
+    }
+    let ok = V3Verify.run(target: target, click: !args.contains("--no-click"))
+    exit(ok ? 0 : 1)
+
+case "responsibility":
+    // The diagnosis for "permissions are on but nothing works".
+    let r = TCCResponsibility.responsiblePid()
+    print("pid                          : \(getpid())")
+    print("responsible pid              : \(r)")
+    print("responsible path             : \(r > 0 ? TCCResponsibility.executablePath(of: r) : "?")")
+    print("self-responsible             : \(TCCResponsibility.isSelfResponsible() ? "yes" : "no")")
+    print("AXIsProcessTrusted           : \(AXBridge.hasAccessibilityPermission())")
+    if !TCCResponsibility.isSelfResponsible() && r > 0 {
+        print("")
+        print("TCC will judge this process by \(TCCResponsibility.executablePath(of: r)),")
+        print("so its Accessibility grant is the one that must be enabled — not dsh-cua's.")
     }
 
 case "doctor-reset":
@@ -63,13 +113,18 @@ case "help", "--help", "-h":
     print("""
     dsh-cua — macOS Computer Use MCP server for DSH
 
-    USAGE: dsh-cua <command>
+    USAGE: dsh-cua <command> [--no-reexec]
 
     COMMANDS:
       mcp             Run as an MCP server over stdio
       doctor          Print permission and environment diagnostics
+      verify <app>    End-to-end check that an Electron/WebUI app is drivable
+      responsibility  Show which process TCC blames for our permissions
       request-perms   Trigger the Accessibility permission prompt
       help            Show this message
+
+    OPTIONS:
+      --no-reexec     Skip the TCC self-disclaim re-exec (diagnostics only)
     """)
 
 default:

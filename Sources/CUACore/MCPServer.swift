@@ -119,6 +119,7 @@ public final class MCPServer {
         }
         switch name {
         case "list_apps": return "列出运行中的 app"
+        case "probe_app": return "探测 \(s("app") ?? "?") 的界面类型与策略"
         case "get_app_state": return "读取 \(s("app") ?? "?") 的界面状态"
         case "click":
             if let x = n("x"), let y = n("y") { return "点击 \(s("app") ?? "?") 坐标 (\(x), \(y))" }
@@ -152,6 +153,9 @@ public final class MCPServer {
             let json = try? JSONSerialization.data(withJSONObject: apps, options: [.prettyPrinted, .sortedKeys])
             let text = json.flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
             return [["type": "text", "text": "Running apps:\n\(text)"]]
+
+        case "probe_app":
+            return try probeApp(args)
 
         case "get_app_state":
             return try getAppState(args)
@@ -349,6 +353,89 @@ public final class MCPServer {
         return nil
     }
 
+    // MARK: - UI capability probe
+
+    /// Answer "what is this app, and can I drive it with element indices?"
+    /// before spending a full `get_app_state` on it.
+    ///
+    /// The tier is computed from the tree's *content* (role counts, AXWebArea,
+    /// characters of readable text), never assumed from the framework. See
+    /// `AppFramework` for why the old framework-based ladder was wrong.
+    private func probeApp(_ args: [String: Any]) throws -> [[String: Any]] {
+        let app = try ax.resolveApp(try requireApp(args))
+        let appEl = ax.appElement(app)
+        let windows = ax.allWindows(app)
+        var stats = AppFramework.measure(appElement: appEl)
+
+        // A thin tree on a Chromium app is usually laziness, not emptiness:
+        // Chromium only builds its accessibility tree once it believes an
+        // assistive client is attached. Ask, then re-measure, and report what
+        // actually changed rather than what the setter returned.
+        var unlockNote = ""
+        if stats.total < 60 && AppFramework.family(of: app) == .electron {
+            let r = AppFramework.requestChromiumAccessibility(appElement: appEl)
+            stats = r.after
+            if r.after.total > r.before.total + 10 {
+                unlockNote = "\nAccessibility unlock: tree grew \(r.before.total) → \(r.after.total) "
+                           + "nodes after requesting Chromium accessibility mode."
+            } else {
+                unlockNote = "\nAccessibility unlock: requested Chromium accessibility mode, "
+                           + "tree did not grow (\(r.before.total) → \(r.after.total))."
+            }
+        }
+        let tier = AppFramework.tier(for: stats,
+                                       windowCount: ax.allWindows(app).count,
+                                       onScreenWindowCount: AppFramework.onScreenWindowCount(pid: app.processIdentifier))
+        let family = AppFramework.family(of: app)
+
+        let topRoles = stats.byRole.sorted { $0.value > $1.value }
+            .prefix(10)
+            .map { "\($0.value)× \($0.key)" }
+            .joined(separator: ", ")
+
+        let frame = ax.windowFrame(app).map {
+            "@\(Int($0.origin.x)),\(Int($0.origin.y)) \(Int($0.width))x\(Int($0.height))"
+        } ?? "unknown"
+
+        let surfaceWindows = AppFramework.onScreenWindowCount(pid: app.processIdentifier)
+
+        // Window titles matter: they are how an agent tells a modal dialog from
+        // the main window, and they change as the app switches views.
+        let windowLines = windows.enumerated().map { i, w -> String in
+            let t = actions.stringAttribute(w, kAXTitleAttribute as String) ?? ""
+            let f = actions.frame(w).map {
+                "@\(Int($0.origin.x)),\(Int($0.origin.y)) \(Int($0.width))x\(Int($0.height))"
+            } ?? "?"
+            return "  [\(i)] \"\(t)\" \(f)"
+        }.joined(separator: "\n")
+
+        var report = """
+        App: \(app.localizedName ?? "?") (\(app.bundleIdentifier ?? "?"))
+        Framework: \(family.rawValue)
+        AX windows: \(windows.count)   Windows on screen: \(surfaceWindows)   Key window frame: \(frame)
+        \(windowLines)
+        Elements: \(stats.total)   Tree depth: \(stats.depth)
+        Controls (buttons/fields/links/menus): \(stats.controlCount)
+        Pressable elements: \(stats.pressable)
+        AXWebArea present: \(stats.hasWebArea ? "yes (\(stats.webAreas))" : "no")
+        Readable text characters: \(stats.textCharacters)
+        Roles: \(topRoles)
+
+        STRATEGY TIER: \(tier.rawValue)
+        \(tier.guidance)\(unlockNote)
+        """
+        if tier == .shallowTree {
+            report += """
+
+
+            The tree is thin, so element_index may be unreliable. Read the window
+            frame from get_app_state, click by coordinates, and drive structured
+            actions through the menu bar (which is always reliable).
+            """
+        }
+        return [["type": "text", "text": report]]
+    }
+
     private func requireApp(_ args: [String: Any]) throws -> String {
         guard let app = args["app"] as? String, !app.isEmpty else {
             throw AXError.invalidArgument("app is required")
@@ -381,7 +468,17 @@ public final class MCPServer {
         // Enumerate ALL windows (not just the key window). Lightroom's import
         // dialog is a separate non-modal window that is not the key window when
         // the Library is focused; clients must be able to see and act on it.
-        let windows = ax.allWindows(app)
+        var windows = ax.allWindows(app)
+
+        // A Chromium/Electron app that has not been asked for its tree yet
+        // reports nothing. Request accessibility mode once, up front, so the
+        // snapshot below is real instead of a misleading "0 elements".
+        if windows.isEmpty || AppFramework.measure(appElement: ax.appElement(app)).total < 60,
+           AppFramework.family(of: app) == .electron {
+            AppFramework.requestChromiumAccessibility(appElement: ax.appElement(app))
+            windows = ax.allWindows(app)
+        }
+
         var roots: [AXNode] = []
         if windows.isEmpty {
             // Fall back to the app element itself if no windows are reported.
@@ -441,7 +538,14 @@ public final class MCPServer {
         header += "Frontmost: \(isFront ? "yes (this app is currently frontmost)" : "no (running in the background)")\n"
         header += "Window frame: \(ax.windowFrame(app).map { "@\(Int($0.origin.x)),\(Int($0.origin.y)) \(Int($0.width))x\(Int($0.height))" } ?? "unknown")\n"
         if let note = screenshotNote { header += "Note: \(note)\n" }
-        header += "Elements in this snapshot: \(ax.registry.count)\n\n"
+        header += "Elements in this snapshot: \(ax.registry.count)\n"
+        // Telling the agent which tier it is in saves it from wasting turns
+        // clicking indices that a thin tree never really exposed.
+        let stats = AppFramework.measure(appElement: ax.appElement(app))
+        let tier = AppFramework.tier(for: stats, windowCount: windows.count,
+                                     onScreenWindowCount: AppFramework.onScreenWindowCount(pid: app.processIdentifier))
+        header += "Framework: \(AppFramework.family(of: app).rawValue)   Strategy tier: \(tier.rawValue)\n"
+        header += "  \(tier.guidance)\n\n"
 
         let body: String
         if disableDiff {
@@ -628,6 +732,23 @@ public final class MCPServer {
             "name": "list_apps",
             "description": "List the apps on this computer that are currently running.",
             "inputSchema": ["type": "object", "properties": [:], "additionalProperties": false],
+            "annotations": ["readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false],
+        ],
+        [
+            "name": "probe_app",
+            "description":
+                "Report what kind of UI an app exposes and which strategy to use, before spending a "
+                + "full get_app_state on it. Returns the framework (Electron / WebKit / native), window "
+                + "count, tree depth, control and pressable counts, whether an AXWebArea exists, how many "
+                + "characters of text are readable from the tree, and a strategy tier (L1_full_tree = use "
+                + "element_index; L2_shallow_tree = coordinates + menu bar; L3_no_windows = menus only). "
+                + "Run this when an app looks like it might expose a poor tree (WebUI / self-drawn UI).",
+            "inputSchema": [
+                "type": "object",
+                "properties": ["app": appProp],
+                "required": ["app"],
+                "additionalProperties": false,
+            ],
             "annotations": ["readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false],
         ],
         [
