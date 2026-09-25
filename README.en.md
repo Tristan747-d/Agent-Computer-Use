@@ -320,15 +320,9 @@ dsh-cua ──writes──> ~/.dsh-cua/<pid>.json + viewport.png
 - **`probe_app` tool.** One cheap call answers "what is this app, and can I use
   `element_index` on it?" before you spend a full `get_app_state`.
 
-**v3.0** — Electron and WebUI broken through. The root cause was never the
-framework; it was TCC attribution. `dsh-cua` is spawned by DSH Launcher, and
-macOS records the whole process tree's Accessibility grant against the
-**parent**, whose own TCC row was `denied` — so AX was dead everywhere (it
-looked like "permission is on but every app returns one `Unknown` element").
-The fix is `TCCResponsibility.reexecIfNeeded()`, which re-execs via
-`responsibility_spawnattrs_setdisclaim` so the process is its own responsible
-process. Adds `TCC responsible process` / `Self-responsible` to
-`dsh-cua doctor`, plus `dsh-cua responsibility` and `dsh-cua verify <app>`.
+**v3.0** — Electron and WebUI supported. Adds the `probe_app` tool, tiers
+decided by tree content, and automatic handling of macOS responsible-process
+attribution. New subcommands: `verify`, `probe-app`, `responsibility`.
 
   **Measured (macOS 27; all silent — frontmost app never changed, `AXPress`
   delivered straight to the target process):**
@@ -382,8 +376,7 @@ Set `DSH_CUA_SIGN_ID=<hash>` to use a different certificate.
 
 ### Traps this codebase documents
 
-Every one of these cost real debugging time. They are recorded here so the next
-person loses minutes instead of hours.
+Recorded so the next person loses minutes instead of hours.
 
 **Signing and TCC**
 
