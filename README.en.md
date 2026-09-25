@@ -165,19 +165,47 @@ Grant in **System Settings → Privacy & Security**. Use the built-in checker:
 
 ### Quick test
 
+**Ask whether an app is drivable first** — one cheap command, far cheaper than
+a full tree dump:
+
 ```sh
-swift run cua-selftest TextEdit
+~/Applications/dsh-cua.app/Contents/MacOS/dsh-cua probe-app "Notion"
+# Framework: Electron (Chromium)    Elements: 353
+# STRATEGY TIER: L1_full_tree
+
+~/Applications/dsh-cua.app/Contents/MacOS/dsh-cua verify Notion
+# 🟩 V3 PASS — Notion: Electron, tier L1_full_tree, 354 nodes, silent actuation OK
 ```
 
-This drives a real app and reports every layer: permissions, app resolution,
-accessibility tree, diff engine, screenshot, key mapping.
+`verify` is the end-to-end self-check: it presses a real control and proves the
+target app was **never brought to the front**.
+
+**Permissions are on but nothing works?** Check TCC attribution first:
+
+```sh
+~/Applications/dsh-cua.app/Contents/MacOS/dsh-cua doctor
+# TCC responsible process : self (this binary) — grants apply to this app
+# Self-responsible        : yes
+```
+
+If that line names a parent process such as `DSH Launcher`, the grant is being
+recorded against someone else. `dsh-cua` fixes this itself (see "v3.0" in the
+changelog) — you do not need to change anything in System Settings.
+
+The older self-test still works: `swift run cua-selftest TextEdit`.
 
 ### Known limitations
 
-- **The accessibility tree can be incomplete.** Canvas, games, and some
-  Electron apps expose few or no elements. Screenshots plus coordinate clicks
-  are then the only route, and that is less precise. The bundled skill tells
-  the agent to notice this and switch strategy rather than flail.
+- **Self-drawn controls and canvas content are never in the AX tree.** Canvas
+  surfaces, games, and self-drawn UIs (WeChat, measured at 16 nodes) expose
+  their content as pixels, not controls. No AX-based approach can reach them;
+  screenshots plus coordinate clicks are the only route. That is an
+  architectural boundary, not a bug.
+- **Electron and WebUI are no longer a limitation** (since v3.0), but some apps
+  still land in L2: the tree is thin and only coordinates plus the menu bar
+  work. Ask `probe_app` first — don't guess.
+- **When `probe_app` says "did not grow", stop retrying.** It means Chromium
+  accessibility mode was requested and the tree did not respond; go to L2.
 - **Screen Recording may be unavailable on recent macOS** for apps launched
   from a terminal rather than from Finder/LaunchServices. Everything except
   the live image keeps working.

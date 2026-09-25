@@ -80,6 +80,16 @@ case "verify":
     let ok = V3Verify.run(target: target, click: !args.contains("--no-click"))
     exit(ok ? 0 : 1)
 
+case "probe-app":
+    // The cheap question to ask before spending a full tree dump. Shares its
+    // report with the probe_app MCP tool so the two can never drift apart.
+    guard let target = args.dropFirst().first(where: { !$0.hasPrefix("--") }) else {
+        FileHandle.standardError.write("usage: dsh-cua probe-app <app>\n".data(using: .utf8)!)
+        exit(2)
+    }
+    let probed = try AXBridge().resolveApp(target)
+    print(MCPServer.probeReport(for: probed))
+
 case "responsibility":
     // The diagnosis for "permissions are on but nothing works".
     let r = TCCResponsibility.responsiblePid()
@@ -119,6 +129,7 @@ case "help", "--help", "-h":
       mcp             Run as an MCP server over stdio
       doctor          Print permission and environment diagnostics
       verify <app>    End-to-end check that an Electron/WebUI app is drivable
+      probe-app <app> Report framework, node count and strategy tier
       responsibility  Show which process TCC blames for our permissions
       request-perms   Trigger the Accessibility permission prompt
       help            Show this message

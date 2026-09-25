@@ -176,17 +176,47 @@ pnpm add link:$HOME/Desktop/DSH-Computer-Use/plugin
 
 ### 快速验证
 
+**先看这个 app 能不能驱动** —— 一条命令，比拉全树便宜得多：
+
 ```sh
-swift run cua-selftest TextEdit
+dsh-cua probe-app "Notion"
+# Framework: Electron (Chromium)    Elements: 354
+# STRATEGY TIER: L1_full_tree
+
+~/Applications/dsh-cua.app/Contents/MacOS/dsh-cua verify Notion
+# 🟩 V3 PASS — Notion: Electron, tier L1_full_tree, 354 nodes, silent actuation OK
 ```
 
-它会真的驱动一个 app，并逐层汇报：权限、app 解析、辅助功能树、diff 引擎、截图、按键映射。
+`verify` 是端到端自检：它会真按一个控件，并证明**目标 app 从未被拉到前台**。
+
+**权限已开却什么都不好使？** 先查 TCC 归因：
+
+```sh
+~/Applications/dsh-cua.app/Contents/MacOS/dsh-cua doctor
+# TCC responsible process : self (this binary) — grants apply to this app
+# Self-responsible        : yes
+```
+
+如果那行显示的是 `DSH Launcher` 之类的父进程，说明授权被记在了别人名下。
+`dsh-cua` 会自动修正（见"版本记录 v3.0"），不需要你去系统设置里改。
+
+老的自检仍然可用：`swift run cua-selftest TextEdit`。
 
 ### 已知限制
 
-- **辅助功能树可能不完整。** 画布、游戏、部分 Electron app 暴露的元素很少甚至没有。
-  这时只能靠截图 + 坐标点击，精度会下降。附带的 skill 会教 agent 识别这种情况并换策略，
-  而不是原地乱试。
+- **自绘控件和画布内容永远不在 AX 树里。** 画布、游戏、微信这类自绘界面的
+  内容对无障碍层不可见 —— 那部分是像素，不是控件。任何 AX 方案都绕不过，
+  只能截图 + 坐标点击。这不是 bug，是架构边界。
+- **Electron / WebUI 已不再是限制**（v3.0 起），但个别 app 仍会落在 L2：
+  树很浅（微信实测仅 16 个节点），只能坐标 + 菜单栏。用 `probe_app` 先问一次，
+  别猜。
+- **`probe_app` 报 `did not grow` 就别再试了。** 那意味着请求了 Chromium 无障碍
+  模式但树没变大，直接按 L2 走。
+- **近期的 macOS 上，屏幕录制权限可能对"从终端启动的 app"不可用**（从
+  Finder/LaunchServices 启动的才正常）。除实时画面外，其余功能不受影响。
+- **用本工具时不要跑性能基准测试。** UI 自动化会持续占用 CPU 和 GPU，
+  同一台机器上跑的任何性能测量都会被污染。
+- **`type_text` 遇到 `\n` 会按下 Return。** 在聊天框或表单里，这意味着发送而不是换行。
 - **近期的 macOS 上，屏幕录制权限可能对"从终端启动的 app"不可用**（从
   Finder/LaunchServices 启动的才正常）。除实时画面外，其余功能不受影响。
 - **用本工具时不要跑性能基准测试。** UI 自动化会持续占用 CPU 和 GPU，

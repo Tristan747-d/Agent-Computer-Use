@@ -31,6 +31,9 @@ whenToUse: 需要点击/输入/读取某个 Mac app 的界面时；或用户让�
 
 `app` 参数可用**显示名、完整路径或 bundle id**。app 没运行时会自动后台拉起。
 
+命令行等价物（同一套判定，报告逐字相同）：
+`dsh-cua probe-app <app>`、`dsh-cua verify <app>`、`dsh-cua doctor`。
+
 ## 静默铁律（v2.0 起，v3.0 实测覆盖 Electron 与 WebUI）
 
 **所有动作默认静默**：直投目标进程（AX API / `CGEvent.postToPid`），**绝不把 app 抢到前台**，

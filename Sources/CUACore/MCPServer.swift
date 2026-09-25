@@ -363,6 +363,18 @@ public final class MCPServer {
     /// `AppFramework` for why the old framework-based ladder was wrong.
     private func probeApp(_ args: [String: Any]) throws -> [[String: Any]] {
         let app = try ax.resolveApp(try requireApp(args))
+        return [["type": "text", "text": Self.probeReport(for: app)]]
+    }
+
+    /// The probe report for one already-resolved app.
+    ///
+    /// Exposed as a static so `dsh-cua probe-app <name>` and the `probe_app`
+    /// MCP tool produce byte-identical output. They used to be two copies of
+    /// the same logic, which is how a documented command drifts away from the
+    /// thing the agent actually calls.
+    public static func probeReport(for app: NSRunningApplication) -> String {
+        let ax = AXBridge()
+        let actions = ActionBridge(ax: ax)
         let appEl = ax.appElement(app)
         let windows = ax.allWindows(app)
         var stats = AppFramework.measure(appElement: appEl)
@@ -433,7 +445,7 @@ public final class MCPServer {
             actions through the menu bar (which is always reliable).
             """
         }
-        return [["type": "text", "text": report]]
+        return report
     }
 
     private func requireApp(_ args: [String: Any]) throws -> String {
