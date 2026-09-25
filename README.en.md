@@ -27,69 +27,11 @@ what you are doing.
 
 ---
 
-## Install
+## Overview
 
-```sh
-git clone https://github.com/Tristan747-d/Agent-Computer-Use.git
-cd Agent-Computer-Use
-./install.sh
-```
-
-An interactive menu asks which agents to install into:
-
-```
-Where should Computer Use be installed?
-
-▸ [x] DSH       sidebar panel + skill · mcp__computer__*
-  [x] OpenClaw  MCP server + skill · mcp__…
-  [x] Hermes    MCP server + skill · dsh-computer-use:<tool>
-
-↑/↓ move · space toggle · a all · n none · enter install · q quit
-```
-
-Hosts that are not on the machine are shown **dimmed and unselectable** rather
-than silently skipped.
-
-Flags remain for non-interactive use (CI, or when you already know):
-
-```sh
-./install.sh --host openclaw --host hermes
-./install.sh --all --yes
-```
-
-The run builds the signed `.app`, writes MCP config per host, installs the
-skill, then runs `doctor` to prove everything.
-
-### Tool names per host
-
-One binary, three naming conventions — these belong to the hosts, not to us:
-
-| Host | Tool name | Config |
-|---|---|---|
-| DSH | `mcp__computer__<tool>` | `~/.dsh/` + panel symlink |
-| OpenClaw | `mcp__…` (match the `<tool>` suffix) | `~/.openclaw/openclaw.json` |
-| Hermes | `dsh-computer-use:<tool>` | `~/.hermes/config.yaml` |
-
-16 tools: `list_apps`, `probe_app`, `get_app_state`, `click`, `set_value`,
-`select_text`, `press_key`, `type_text`, `scroll`, `drag`, `move_mouse`,
-`perform_secondary_action`, `clipboard_copy`, `start_live_view`,
-`stop_live_view`, `live_view_status`.
-
-### About the rename
-
-Formerly **DSH Computer Use**. The **bundle id stays
-`com.tristan.dsh.computeruse`** on purpose: macOS TCC records grants by bundle
-identity (the designated requirement pins
-`identifier "com.tristan.dsh.computeruse"`), so changing it would silently
-revoke every user's Accessibility and Screen Recording grant and force manual
-re-authorization. Backward compatibility is provided by a `dsh-cua.app` alias
-pointing at the real bundle — not a second copy, since two bundles with one id
-make LaunchServices resolution ambiguous and quietly break Screen Recording.
-
-## For Customers
-
-You want your DSH agent to actually *operate* your Mac — open an app, fill a
-form, click a button, read what's on screen. This gives it that.
+You want your agent to actually *operate* your Mac — open an app, fill a form,
+click a button, read what's on screen. This gives it that, in DSH, OpenClaw or
+Hermes alike.
 
 ### Why this exists
 
@@ -165,114 +107,127 @@ the model's own use; the live stream is for the human watching the panel.
 ### Install
 
 ```sh
-git clone https://github.com/Tristan747-d/DSH-Computer-Use.git
-cd DSH-Computer-Use
-./build-app.sh --install
+git clone https://github.com/Tristan747-d/Agent-Computer-Use.git
+cd Agent-Computer-Use
+./install.sh
 ```
 
-Then add two rows to `~/.dsh/profiles/web/cordis.patch.yml`:
+Pick which agents to install into:
 
-```yaml
-- insert:
-    - id: mcp-computer-use
-      name: '@deepseek-ai/dsh-mcp-client'
-      config:
-        serverName: computer
-        transport: stdio
-        command: !!js process.env.HOME + '/Applications/dsh-cua.app/Contents/MacOS/dsh-cua'
-        args: ['mcp']
-        toolCallTimeoutMs: 120000
-        failOnStartupError: false
-        reconnect:
-          enabled: true
+```
+Where should Computer Use be installed?
 
-    - id: computer-use-panel
-      name: 'dsh-computer-use-panel'
+▸ [x] DSH       sidebar panel + skill · mcp__computer__*
+  [x] OpenClaw  MCP server + skill · mcp__…
+  [x] Hermes    MCP server + skill · dsh-computer-use:<tool>
+
+↑/↓ move · space toggle · a all · n none · enter install · q quit
 ```
 
-And install the panel plugin into the profile:
+Hosts that are not installed are dimmed and unselectable. To skip the menu:
 
 ```sh
-cd ~/.dsh/profiles/web
-pnpm add link:$HOME/Desktop/DSH-Computer-Use/plugin
+./install.sh --host openclaw --host hermes
+./install.sh --all --yes
 ```
 
-Copy `skill/SKILL.md` into `~/.dsh/skills/computer-use/SKILL.md` so the agent
-knows how to use the tools. Then restart DSH. The sidebar gets a monitor icon;
-the agent gets 11 new tools.
+### Tool names per host
+
+One binary, three naming conventions:
+
+| Host | Tool name | Config |
+|---|---|---|
+| DSH | `mcp__computer__<tool>` | `~/.dsh/` + panel symlink |
+| OpenClaw | `mcp__…` (match the `<tool>` suffix) | `~/.openclaw/openclaw.json` |
+| Hermes | `dsh-computer-use:<tool>` | `~/.hermes/config.yaml` |
+
+16 tools: `list_apps`, `probe_app`, `get_app_state`, `click`, `set_value`,
+`select_text`, `press_key`, `type_text`, `scroll`, `drag`, `move_mouse`,
+`perform_secondary_action`, `clipboard_copy`, `start_live_view`,
+`stop_live_view`, `live_view_status`.
+
+### Typical flow
+
+```
+probe_app("Notion")     → framework, node count, can I click by index?
+get_app_state("Notion") → full AX tree + screenshot
+click(element_index=14) → click
+```
+
+**Call `probe_app` first.** One call tells you which route to take:
+
+| Tier | Decided by | Strategy |
+|---|---|---|
+| `L1_full_tree` | ≥12 controls and ≥60 nodes, or an AXWebArea with ≥400 chars of text | `element_index` + `AXPress` |
+| `L2_shallow_tree` | Thin tree, but a window exists | Coordinates + menu bar |
+| `L3_no_windows` | No window at all | Menus + blind keyboard nav |
 
 ### Permissions
 
 Two macOS permissions. **Accessibility is required**; Screen Recording is
 optional.
 
-| Permission | Needed for | Status without it |
+| Permission | Needed for | Without it |
 |---|---|---|
 | **Accessibility** | Every tool | Nothing works |
-| **Screen Recording** | The live screen image only | Everything else still works |
+| **Screen Recording** | The live image only | Everything else works |
 
-Grant in **System Settings → Privacy & Security**. Use the built-in checker:
-
-```sh
-~/Applications/dsh-cua.app/Contents/MacOS/dsh-cua doctor
-```
-
-> **Important:** grants attach to the signed app, and **only one copy of the
-> app may exist**. If you keep extra copies around, macOS cannot decide which
-> one you authorized and the grant silently fails to apply. `build-app.sh`
-> removes competing copies automatically.
-
-### Quick test
-
-**Ask whether an app is drivable first** — one cheap command, far cheaper than
-a full tree dump:
+Grant in **System Settings → Privacy & Security → Accessibility / Screen
+Recording**. Check status:
 
 ```sh
-~/Applications/dsh-cua.app/Contents/MacOS/dsh-cua probe-app "Notion"
-# Framework: Electron (Chromium)    Elements: 353
-# STRATEGY TIER: L1_full_tree
-
-~/Applications/dsh-cua.app/Contents/MacOS/dsh-cua verify Notion
-# 🟩 V3 PASS — Notion: Electron, tier L1_full_tree, 354 nodes, silent actuation OK
+~/Applications/Agent\ Computer\ Use.app/Contents/MacOS/agent-cua doctor
 ```
 
-`verify` is the end-to-end self-check: it presses a real control and proves the
-target app was **never brought to the front**.
+> **Important:** grants attach to the signed app, and **only one copy may
+> exist**. Extra copies make it ambiguous which one you authorized, and the
+> grant then silently fails to apply. `build-app.sh` removes strays.
 
-**Permissions are on but nothing works?** Check TCC attribution first:
+macOS decides permission by **responsible process** (walking up the parent
+chain), so a host agent's identity can shadow this program's. It handles that
+automatically — you do not need to change anything. If `TCC responsible
+process` in `doctor` names something else, re-run `./install.sh`.
 
-```sh
-~/Applications/dsh-cua.app/Contents/MacOS/dsh-cua doctor
-# TCC responsible process : self (this binary) — grants apply to this app
-# Self-responsible        : yes
-```
+### Supported apps
 
-If that line names a parent process such as `DSH Launcher`, the grant is being
-recorded against someone else. `dsh-cua` fixes this itself (see "v3.0" in the
-changelog) — you do not need to change anything in System Settings.
+Measured on macOS 27:
 
-The older self-test still works: `swift run cua-selftest TextEdit`.
+| App | Kind | Nodes | Tier |
+|---|---|---|---|
+| DSH Launcher | WebUI (WKWebView) | 1542 | L1 |
+| ChatGPT | Native + WebArea | 509 | L1 |
+| Notion / Canva / GenOffice / WorkBuddy AI | Electron | 175–354 | L1 |
+| QQ / Clash | Native | 78–126 | L1 |
+| WeChat | Native (self-drawn) | 16 | L2 |
+| Finder | Native | 26 | L2 |
 
-### Known limitations
+Reproduce with `agent-cua verify <app>`.
 
-- **Self-drawn controls and canvas content are never in the AX tree.** Canvas
-  surfaces, games, and self-drawn UIs (WeChat, measured at 16 nodes) expose
-  their content as pixels, not controls. No AX-based approach can reach them;
-  screenshots plus coordinate clicks are the only route. That is an
-  architectural boundary, not a bug.
-- **Electron and WebUI are no longer a limitation** (since v3.0), but some apps
-  still land in L2: the tree is thin and only coordinates plus the menu bar
-  work. Ask `probe_app` first — don't guess.
-- **When `probe_app` says "did not grow", stop retrying.** It means Chromium
-  accessibility mode was requested and the tree did not respond; go to L2.
-- **Screen Recording may be unavailable on recent macOS** for apps launched
-  from a terminal rather than from Finder/LaunchServices. Everything except
-  the live image keeps working.
-- **Don't benchmark while using this.** UI automation holds CPU and GPU
-  continuously, which will corrupt any performance measurement you run on the
-  same machine.
-- **`type_text` presses Return on `\n`.** In a chat box or form, that sends
-  rather than inserting a newline.
+**Self-drawn controls and canvas content are never in the AX tree** — canvases,
+games and WeChat-class UIs render content as pixels, not controls, so only
+screenshots plus coordinates can reach them. That is a boundary of any AX-based
+approach, not a defect.
+
+### FAQ
+
+**Permissions are granted but every app returns one element.**
+Permission is decided by responsible process and was recorded against a parent.
+This is handled automatically; if it persists, re-run `./install.sh`.
+
+**`probe_app` says "did not grow".**
+Chromium accessibility mode was requested and the tree did not respond. Go to
+L2; don't retry.
+
+**Does upgrading from DSH Computer Use lose my grants?**
+No. The bundle id is unchanged and grants survive. The old `dsh-cua.app` path
+still works (a symlink to the real bundle).
+
+**Screen Recording doesn't work.**
+On some macOS versions it is unavailable to apps launched from a terminal.
+Launch from Finder instead.
+
+**Does `\n` in `type_text` insert a newline?**
+No — it presses Return, which sends in a chat box.
 
 ---
 
@@ -283,7 +238,7 @@ The older self-test still works: `swift run cua-selftest TextEdit`.
 ```
 DSH (web profile)
   ├─ @deepseek-ai/dsh-mcp-client             stdio
-  │    └─ dsh-cua.app/Contents/MacOS/dsh-cua mcp
+  │    └─ agent-cua mcp
   │         ├─ AXBridge         AX tree walk · element registry · diffing
   │         ├─ ActionBridge     CGEvent input · AX actions · capture
   │         ├─ StateBroadcaster live state for the panel
