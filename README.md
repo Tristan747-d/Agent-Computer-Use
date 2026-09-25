@@ -55,13 +55,31 @@ V3.0 攻破了此前最难的两类目标：**Electron** 和 **WebUI**。
 ```sh
 git clone https://github.com/Tristan747-d/Agent-Computer-Use.git
 cd Agent-Computer-Use
-./install.sh                              # 装进本机所有已装的宿主
-./install.sh --host dsh                   # 或只装某一个
-./install.sh --host openclaw --host hermes
+./install.sh
 ```
 
-`install.sh` 会：构建签名的 `.app` → 按宿主写 MCP 配置 → 装 skill → 最后跑
-`doctor` 自证。未安装的宿主会被**跳过**而不是报错。
+交互式菜单，勾选要装进哪些 agent：
+
+```
+Where should Computer Use be installed?
+
+▸ [x] DSH       sidebar panel + skill · mcp__computer__*
+  [x] OpenClaw  MCP server + skill · mcp__…
+  [x] Hermes    MCP server + skill · dsh-computer-use:<tool>
+
+↑/↓ move · space toggle · a all · n none · enter install · q quit
+```
+
+机器上没装的宿主会**灰显且不可选**，而不是让你勾了却什么都没发生。
+
+非交互场景（CI / 已知目标）保留 flags：
+
+```sh
+./install.sh --host openclaw --host hermes
+./install.sh --all --yes
+```
+
+流程：构建签名 `.app` → 按宿主写 MCP 配置 → 装 skill → 跑 `doctor` 自证。
 
 **为什么必须是签名的 `.app`**：TCC 记录代码签名需求。ad-hoc 签名绑的是 CDHash，
 每次重编都会吊销辅助功能授权；Apple Development 证书绑 bundle id + 证书 CN，

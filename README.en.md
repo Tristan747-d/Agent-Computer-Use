@@ -32,14 +32,33 @@ what you are doing.
 ```sh
 git clone https://github.com/Tristan747-d/Agent-Computer-Use.git
 cd Agent-Computer-Use
-./install.sh                              # every host found on this machine
-./install.sh --host dsh                   # or just one
-./install.sh --host openclaw --host hermes
+./install.sh
 ```
 
-`install.sh` builds the signed `.app`, writes MCP config per host, installs the
-skill, then runs `doctor` to prove it. Hosts that are not installed are
-**skipped**, not failed.
+An interactive menu asks which agents to install into:
+
+```
+Where should Computer Use be installed?
+
+▸ [x] DSH       sidebar panel + skill · mcp__computer__*
+  [x] OpenClaw  MCP server + skill · mcp__…
+  [x] Hermes    MCP server + skill · dsh-computer-use:<tool>
+
+↑/↓ move · space toggle · a all · n none · enter install · q quit
+```
+
+Hosts that are not on the machine are shown **dimmed and unselectable** rather
+than silently skipped.
+
+Flags remain for non-interactive use (CI, or when you already know):
+
+```sh
+./install.sh --host openclaw --host hermes
+./install.sh --all --yes
+```
+
+The run builds the signed `.app`, writes MCP config per host, installs the
+skill, then runs `doctor` to prove everything.
 
 ### Tool names per host
 
