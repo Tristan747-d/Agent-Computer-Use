@@ -1,6 +1,6 @@
 {
   "name": "dsh-computer-use-panel",
-  "version": "3.1.1",
+  "version": "3.2.0",
   "private": true,
   "type": "module",
   "description": "Live Computer Use viewport for DSH: a sidebar panel showing what the agent is doing on screen, in real time.",
