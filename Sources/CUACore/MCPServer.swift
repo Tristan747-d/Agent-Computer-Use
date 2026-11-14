@@ -18,6 +18,8 @@ public final class MCPServer {
     private lazy var mjpeg = MJPEGServer(streamer: streamer)
 
     private var initialized = false
+    /// 最近一次录好的文件，供 open_recording 不带参数时打开。
+    private var lastRecordingPath: String?
 
     public init() {
         let base = FileManager.default.homeDirectoryForCurrentUser
@@ -37,6 +39,14 @@ public final class MCPServer {
         defer {
             mjpeg.stop()
             streamer.stop()
+            if #available(macOS 15.0, *), SessionRecorder.shared.isRecording {
+                let semaphore = DispatchSemaphore(value: 0)
+                Task.detached {
+                    _ = await SessionRecorder.shared.stop()
+                    semaphore.signal()
+                }
+                semaphore.wait()
+            }
             state.setStreamURL(nil)
             state.markDisconnected()
         }
@@ -47,13 +57,20 @@ public final class MCPServer {
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 continue
             }
-            handle(obj)
+            // 工具实现里有 `await`（SCScreenshotManager 截图 + Vision OCR），
+            // 派发到异步任务并阻塞到完成：仍是一条一条处理，响应顺序与请求一致。
+            let gate = DispatchSemaphore(value: 0)
+            Task.detached { [self] in
+                await handle(obj)
+                gate.signal()
+            }
+            gate.wait()
         }
     }
 
     // MARK: - Dispatch
 
-    private func handle(_ msg: [String: Any]) {
+    private func handle(_ msg: [String: Any]) async {
         let method = msg["method"] as? String ?? ""
         let id = msg["id"]  // may be String, Int, or absent (notification)
 
@@ -63,7 +80,7 @@ public final class MCPServer {
             respond(id: id, result: [
                 "protocolVersion": "2024-11-05",
                 "capabilities": ["tools": ["listChanged": false]],
-                "serverInfo": ["name": "dsh-computer-use", "version": "2.1.0"],
+                "serverInfo": ["name": "dsh-computer-use", "version": "4.0.0"],
             ])
 
         case "notifications/initialized", "initialized":
@@ -81,7 +98,7 @@ public final class MCPServer {
             let args = params["arguments"] as? [String: Any] ?? [:]
             let appName = args["app"] as? String
             do {
-                let content = try call(name: name, args: args)
+                let content = try await call(name: name, args: args)
                 state.recordTool(name, detail: Self.summarize(name, args), app: appName)
                 respond(id: id, result: ["content": content, "isError": false])
             } catch {
@@ -138,11 +155,15 @@ public final class MCPServer {
         case "start_live_view": return "开启实时画面 → \(s("app") ?? "?")"
         case "stop_live_view": return "停止实时画面"
         case "live_view_status": return "查询实时画面状态"
+        case "pick_window": return "让用户亲手选择要操作的窗口"
+        case "start_recording": return "开始录制 \(s("app") ?? "?") 的操作过程"
+        case "stop_recording": return "停止录制"
+        case "open_recording": return "打开录像编辑器"
         default: return name
         }
     }
 
-    private func call(name: String, args: [String: Any]) throws -> [[String: Any]] {
+    private func call(name: String, args: [String: Any]) async throws -> [[String: Any]] {
         // Foreground fallback is opt-in per call, and off unless asked for.
         actions.allowsForegroundFallback = (args["allow_foreground"] as? Bool) ?? false
         defer { actions.allowsForegroundFallback = false }
@@ -158,7 +179,7 @@ public final class MCPServer {
             return try probeApp(args)
 
         case "get_app_state":
-            return try getAppState(args)
+            return try await getAppState(args)
 
         case "click":
             return try clickTool(args)
@@ -236,12 +257,86 @@ public final class MCPServer {
         case "live_view_status":
             return try liveViewStatus(args)
 
+        case "pick_window":
+            return try await pickWindow()
+
+        case "start_recording":
+            guard #available(macOS 15.0, *) else {
+                throw AXError.attributeFailed("Recording needs macOS 15 or newer (SCRecordingOutput)")
+            }
+            let app = try ax.resolveApp(try requireApp(args))
+            guard let wid = actions.windowID(for: app) else {
+                throw AXError.attributeFailed("no on-screen window for \(app.localizedName ?? "?")")
+            }
+            let path = try await SessionRecorder.shared.start(
+                windowID: wid,
+                appName: app.localizedName ?? "app"
+            )
+            return [["type": "text", "text":
+                "Recording window \(wid) of \(app.localizedName ?? "?") to \(path). "
+                + "Call stop_recording when done."]]
+
+        case "stop_recording":
+            guard #available(macOS 15.0, *) else {
+                return [["type": "text", "text": "Recording needs macOS 15 or newer."]]
+            }
+            guard #available(macOS 15.0, *), let info = await SessionRecorder.shared.stop() else {
+                return [["type": "text", "text": "No recording in progress."]]
+            }
+            lastRecordingPath = info.path
+            return [["type": "text", "text": String(
+                format: "Recording saved: %@ · %.1fs · %.1f MB",
+                info.path, info.seconds, Double(info.bytes) / 1_048_576
+            )]]
+
+        case "open_recording":
+            // 弹系统录像编辑器：只在用户明确要求时用。
+            guard let path = (args["path"] as? String) ?? lastRecordingPath else {
+                return [["type": "text", "text": "No recording to open yet."]]
+            }
+            let message = await MainActor.run { () -> String in
+                if #available(macOS 27.0, *) {
+                    return SessionRecorder.presentEditor(for: path)
+                }
+                return "Recording editor needs macOS 27 or newer; file is at \(path)"
+            }
+            return [["type": "text", "text": message]]
+
         default:
             throw AXError.invalidArgument("Unknown tool: \(name)")
         }
     }
 
     /// Point the live video at an app's window and start streaming.
+    /// 弹出系统的窗口选择器，让用户亲手挑一个窗口，然后把它交给后续动作。
+    ///
+    /// 适合 app 开了很多窗口、或 agent 猜错窗口的场景：选择器是系统原生的，
+    /// 用户点完即生效，不会被抢焦点，也自带“排除自己的窗口”。
+    private func pickWindow() async throws -> [[String: Any]] {
+        let mutex = DispatchSemaphore(value: 0)
+        var outcome: Result<WindowPicker.Choice, Error>?
+        WindowPicker.shared.present { result in
+            outcome = result
+            mutex.signal()
+        }
+        mutex.wait()
+        switch outcome {
+        case .success(let choice):
+            let appLabel = choice.appName
+            // 把选择结果接到实时画面上，用户选完就能看到。
+            streamer.start(windowID: choice.windowID, appName: appLabel) { _ in }
+            return [["type": "text", "text":
+                "User picked window \(choice.windowID) of \(appLabel) “\(choice.title)” "
+                + "@\(Int(choice.bounds.origin.x)),\(Int(choice.bounds.origin.y)) "
+                + "\(Int(choice.bounds.width))x\(Int(choice.bounds.height)).\n"
+                + "Use this app name for subsequent tools: \(appLabel)"]]
+        case .failure(let error):
+            throw AXError.attributeFailed((error as? CustomStringConvertible)?.description ?? "\(error)")
+        case nil:
+            throw AXError.attributeFailed("window picker returned no result")
+        }
+    }
+
     ///
     /// Streaming does not raise the window: ScreenCaptureKit can capture a
     /// background window, so this keeps the silence contract intact.
@@ -470,7 +565,7 @@ public final class MCPServer {
         return el
     }
 
-    private func getAppState(_ args: [String: Any]) throws -> [[String: Any]] {
+    private func getAppState(_ args: [String: Any]) async throws -> [[String: Any]] {
         let app = try ax.resolveApp(try requireApp(args))
         let disableDiff = (args["disableDiff"] as? Bool) ?? false
 
@@ -517,15 +612,36 @@ public final class MCPServer {
 
         // Screenshot alongside the tree (best-effort; needs Screen Recording).
         var screenshotNote: String? = nil
+        var ocrText: String? = nil
         if let wid = actions.windowID(for: app) {
             let path = "\(screenshotDir)/\(app.processIdentifier)-\(wid).png"
             do {
-                try actions.captureWindow(wid, to: path)
+                let shot = try await SnapshotCapture.capture(windowID: wid)
+                if let png = shot.pngData {
+                    try? png.write(to: URL(fileURLWithPath: path))
+                }
                 out.append([
                     "type": "image",
-                    "data": try Data(contentsOf: URL(fileURLWithPath: path)).base64EncodedString(),
-                    "mimeType": "image/png",
+                    "data": shot.imageData.base64EncodedString(),
+                    "mimeType": shot.mimeType,
                 ])
+                // OCR covers what AX cannot: canvas / Electron-drawn text,
+                // images of text, web content that is not exposed as AXTextArea.
+                //
+                // Vision 的文本识别在本机是「每种图片尺寸第一次要编 30–150 s 的
+                // ANE 图」，所以冷态不干等：识别任务在后台继续跑，本轮先给 AX 树，
+                // 同一尺寸热了以后（<1 s）再自动带上文字。
+                let ocr = await SnapshotCapture.recognizeText(in: shot.imageData)
+                var ocrNote = "OCR \(ocr?.lines.count ?? 0) 行 \(ocr?.elapsedMS ?? 0)ms"
+                if SnapshotCapture.lastOCRtimedOut {
+                    ocrNote = "OCR 预热中（同尺寸下一次调用即带上文字）"
+                } else if let ocr, !ocr.lines.isEmpty {
+                    ocrText = Self.renderOCR(ocr)
+                }
+                // 不管有没有文字，都把「截图用了哪条路、多大、多久」写进 Note：
+                // 这是排障时唯一能确认截图真的走了 SCK 的证据。
+                screenshotNote = "\(shot.backend) \(Int(shot.pixelSize.width))×\(Int(shot.pixelSize.height))"
+                    + " \(shot.elapsedMS)ms · \(ocrNote)"
             } catch {
                 screenshotNote = "screenshot unavailable: \((error as? CustomStringConvertible)?.description ?? "\(error)")"
             }
@@ -566,7 +682,40 @@ public final class MCPServer {
             body = ax.diffTextMulti(appKey: "\(app.processIdentifier)", roots: roots, fullText: fullText) ?? fullText
         }
 
-        out.insert(["type": "text", "text": header + body], at: 0)
+        // OCR 结果接在 AX 树后面：AX 没暴露的文字（canvas / Electron 自绘 /
+        // 图片里的字）从这里补上，同时给出画面像素坐标方便直接点。
+        let ocrSection = ocrText.map { "\n\n## OCR text (from the screenshot; AX may not expose these)\n" + $0 } ?? ""
+        out.insert(["type": "text", "text": header + body + ocrSection], at: 0)
+        return out
+    }
+
+    /// 把 OCR 行排成「读取顺序 + 像素坐标」的纯文本。
+    ///
+    /// 先按行高聚类成行，行内按 x 排序；坐标用截图像素，同时给出屏幕点坐标，
+    /// 因为 `click(x:y:)` 收的是屏幕点。
+    private static func renderOCR(_ ocr: SnapshotCapture.OCR) -> String {
+        let lines = ocr.lines.sorted { $0.rect.midY < $1.rect.midY }
+        var rows: [[SnapshotCapture.OCRLine]] = []
+        for line in lines {
+            if let last = rows.last, let reference = last.first,
+               abs(reference.rect.midY - line.rect.midY) < max(6, reference.rect.height * 0.5) {
+                rows[rows.count - 1].append(line)
+            } else {
+                rows.append([line])
+            }
+        }
+
+        var out = "Working edge: \(ocr.workingEdge)px · \(ocr.lines.count) lines · \(ocr.elapsedMS)ms\n"
+        for row in rows {
+            let sorted = row.sorted { $0.rect.minX < $1.rect.minX }
+            let text = sorted.map(\.text).joined(separator: " ")
+            let union = sorted.dropFirst().reduce(sorted[0].rect) { $0.union($1.rect) }
+            let confidence = sorted.map(\.confidence).min() ?? 0
+            out += String(
+                format: "[%4.0f,%4.0f %4.0fx%3.0f  %.2f] %@\n",
+                union.minX, union.minY, union.width, union.height, confidence, text
+            )
+        }
         return out
     }
 
@@ -964,6 +1113,50 @@ public final class MCPServer {
             "description": "Report live view statistics: streaming state, frame count, fps, connected viewers and the MJPEG URL.",
             "inputSchema": ["type": "object", "properties": [:], "additionalProperties": false],
             "annotations": ["readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false],
+        ],
+        [
+            "name": "pick_window",
+            "description":
+                "Ask the USER to choose a window with the system sharing picker (SCContentSharingPicker). "
+                + "Use this when an app has many windows and guessing the largest one is risky — e.g. a "
+                + "browser, an editor with several documents, or a chat app. Returns the window id, app "
+                + "name, title and frame. Blocks until the user picks or cancels (120 s timeout).",
+            "inputSchema": ["type": "object", "properties": [:], "additionalProperties": false],
+            "annotations": ["readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false],
+        ],
+        [
+            "name": "start_recording",
+            "description":
+                "Record an app's window to a local .mov while you work on it (SCRecordingOutput). "
+                + "Useful when the user wants to review what changed, or when a multi-step edit should "
+                + "be replayable. Files land in ~/Library/Caches/dsh-cua/recordings. The window is not "
+                + "brought forward. Call stop_recording when the task is done.",
+            "inputSchema": [
+                "type": "object",
+                "properties": ["app": appProp],
+                "required": ["app"],
+                "additionalProperties": false,
+            ],
+            "annotations": ["readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false],
+        ],
+        [
+            "name": "stop_recording",
+            "description": "Stop the window recording started by start_recording and report the file path, duration and size.",
+            "inputSchema": ["type": "object", "properties": [:], "additionalProperties": false],
+            "annotations": ["readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false],
+        ],
+        [
+            "name": "open_recording",
+            "description":
+                "Open the system recording editor (SCRECordingEditor) for a finished recording so the "
+                + "user can preview or share it. THIS SHOWS A WINDOW — only call it when the user asks "
+                + "to see the recording. Defaults to the most recent stop_recording result.",
+            "inputSchema": [
+                "type": "object",
+                "properties": ["path": ["type": "string", "description": "Optional .mov path; defaults to the last recording"]],
+                "additionalProperties": false,
+            ],
+            "annotations": ["readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false],
         ],
     ]
 }

@@ -13,6 +13,21 @@ import AppKit
 
 let target = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "Finder"
 
+/// 顶部代码是同步的，截图与 OCR 是 async 的：这里用信号量把它们「拉回同步」。
+func awaitCapture<T>(_ body: @escaping () async throws -> T) throws -> T {
+    let semaphore = DispatchSemaphore(value: 0)
+    var result: Result<T, Error>?
+    Task.detached {
+        let r: Result<T, Error>
+        do { r = .success(try await body()) } catch { r = .failure(error) }
+        result = r
+        semaphore.signal()
+    }
+    semaphore.wait()
+    guard let result else { throw AXError.attributeFailed("capture task did not finish") }
+    return try result.get()
+}
+
 var failures: [String] = []
 
 func section(_ s: String) { print("\n=== \(s) ===") }
@@ -143,10 +158,18 @@ section("screenshot")
 if let wid = actions.windowID(for: app) {
     let path = "/tmp/dsh-cua-selftest.png"
     do {
-        try actions.captureWindow(wid, to: path)
+        let shot = try awaitCapture { try await SnapshotCapture.capture(windowID: wid) }
+        try (shot.pngData ?? shot.imageData).write(to: URL(fileURLWithPath: path))
         let attrs = try? FileManager.default.attributesOfItem(atPath: path)
         let size = (attrs?[.size] as? Int) ?? 0
-        print("captured window \(wid) -> \(path) (\(size) bytes) ✅")
+        print("captured window \(wid) via \(shot.backend) \(Int(shot.pixelSize.width))×\(Int(shot.pixelSize.height)) "
+              + "in \(shot.elapsedMS)ms -> \(path) (\(size) bytes) ✅")
+        if let ocr = try awaitCapture({ await SnapshotCapture.recognizeText(in: shot.imageData) }) {
+            print("  OCR: \(ocr.lines.count) lines in \(ocr.elapsedMS)ms (working edge \(ocr.workingEdge)px) ✅")
+            for line in ocr.lines.prefix(3) { print("    \(line.text)") }
+        } else {
+            print("  OCR: unavailable")
+        }
     } catch {
         print("capture unavailable: \(error)")
         print("  (expected without Screen Recording permission — grant it in System Settings)")

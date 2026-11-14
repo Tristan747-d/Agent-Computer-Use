@@ -12,7 +12,7 @@
                 │ MCP over stdio
 ┌───────────────▼─────────────────────────┐
 │  Agent Computer Use (签名 .app)          │
-│  16 个工具 · AX 树 · 截图 · 实时视频      │
+│  20 个工具 · AX 树 · 截图 · 实时视频      │
 └───────────────┬─────────────────────────┘
                 │ 直投进程（永不抢前台）
 ┌───────────────▼─────────────────────────┐
@@ -28,6 +28,7 @@
 
 - [安装](#安装)
 - [用起来](#用起来)
+- [4.0 新增：截图、读字、挑窗口、录像](#40-新增截图读字挑窗口录像)
 - [静默是什么意思](#静默是什么意思)
 - [权限](#权限)
 - [支持哪些 app](#支持哪些app)
@@ -80,10 +81,13 @@ Where should Computer Use be installed?
 | OpenClaw | `mcp__…`（认 `<tool>` 后缀） | `~/.openclaw/openclaw.json` |
 | Hermes | `dsh-computer-use:<tool>` | `~/.hermes/config.yaml` |
 
-16 个工具：`list_apps`、`probe_app`、`get_app_state`、`click`、`set_value`、
+20 个工具：`list_apps`、`probe_app`、`get_app_state`、`click`、`set_value`、
 `select_text`、`press_key`、`type_text`、`scroll`、`drag`、`move_mouse`、
 `perform_secondary_action`、`clipboard_copy`、`start_live_view`、
-`stop_live_view`、`live_view_status`。
+`stop_live_view`、`live_view_status`，以及本版新增的
+`pick_window`（系统共享选择器让用户亲手挑窗口）、
+`start_recording` / `stop_recording`（SCRecordingOutput 录操作过程）、
+`open_recording`（SCRECordingEditor 预览/分享录像）。
 
 ### 典型流程
 
@@ -92,6 +96,70 @@ probe_app("Notion")     → 什么框架、多少节点、能不能按索引点
 get_app_state("Notion") → 完整 AX 树 + 截图
 click(element_index=14) → 点
 ```
+
+### 屏幕相关的四个工具（4.0）
+
+```
+pick_window()                       → 让用户亲手挑窗口（系统共享选择器）
+start_recording(app:"Notion")       → 开始录这个窗口的操作过程
+stop_recording()                    → 收尾，返回 .mov 路径 / 时长 / 大小
+open_recording()                    → 系统录像编辑器预览（会弹窗，仅在用户要求时用）
+```
+
+## 4.0 新增：截图、读字、挑窗口、录像
+
+这一版把屏幕相关的部分全部换成 ScreenCaptureKit 的现役 API，并补上视觉模型能读、AX 读不到的东西。
+
+### 截图：`SCScreenshotManager`
+
+`get_app_state` 的截图原先走 `CGWindowListCreateImage`（macOS 15 起废弃）。现在默认用
+`SCScreenshotManager.captureImage(contentFilter:configuration:)`：不起流、不加线程，
+拍的是**目标窗口**，窗口全程待在后台。
+
+| 环节 | 实测（M5，访达 1710×1074 窗口） |
+| --- | --- |
+| `SCScreenshotManager` 单帧 | 150–650 ms |
+| 画面编码（JPEG 0.8） | 20–60 ms |
+| 发给模型的那张图 | JPEG，比 PNG 小一个量级、编码快 4–5 倍 |
+| 落盘存档 | 仍写 PNG（`~/Library/Caches/dsh-cua/<pid>-<窗号>.png`） |
+
+只有 ScreenCaptureKit 列不出该窗口时才回退到旧 API。
+
+### 读字：`Vision.RecognizeTextRequest`
+
+截图后顺手跑一次文字识别，把 AX 树看不到的字（canvas、Electron 自绘、图片里的字）
+附在 `get_app_state` 结果的末尾，按阅读顺序给出「像素坐标 + 置信度」：
+
+```
+## OCR text (from the screenshot; AX may not expose these)
+Working edge: 2400px · 134 lines · 937ms
+[  21,  60 1426x 21  0.30] 最近使用 2026年西外体育节
+[ 248, 149 1371x 20  1.00] Macintosh HD 2026-10-11 15:06 328.38 GB 启动宗卷
+```
+
+**一个必须知道的限制**：这版 macOS 的文本识别，**每换一种图片尺寸都要重新编译一次 ANE 图**。
+实测冷态 30–150 s，同尺寸第二次 0.3–1 s。所以：
+
+- 同尺寸热态：随 `get_app_state` 一起返回，整次调用 2.6–3.9 s；
+- 首次遇到新尺寸：只等 1.2 s，识别任务留在后台继续编图，**不拖住工具调用**；
+  下一次同尺寸调用就带上文字。
+
+### 挑窗口：`pick_window`（`SCContentSharingPicker`）
+
+一个 app 开了很多窗口时，让**用户**用系统共享选择器亲手点一个，比猜「最大的那个」可靠。
+选择器里默认排除本程序和 DSH 面板本身，防止误选后一直拍自己。
+
+### 录像：`start_recording` / `stop_recording` / `open_recording`
+
+- `SCRecordingOutput` 把 agent 操作的窗口录成 `.mov`（默认 H.264，15 fps，最长边 ≤2400 px），
+  落在 `~/Library/Caches/dsh-cua/recordings`；
+- 录像时窗口同样不需要到前台；录自己（DSH 面板）会被拒绝；
+- `open_recording` 用 `SCRECordingEditor`（macOS 27+）弹出系统预览/分享界面——
+  **这会让一个窗口出现**，所以只在用户明确要求看录像时才调用。
+
+### 一个没接的：`SCVideoEffectOutput`
+
+它在头文件里是 `API_UNAVAILABLE(macos)`——iOS 27 的摄像头视频特效，与窗口截屏无关。
 
 **先 `probe_app` 再动手。** 一次调用告诉你该走哪条路，比直接拉全树便宜得多：
 
@@ -184,6 +252,9 @@ swift run cua-selftest TextEdit
 | 路径 | 作用 |
 |---|---|
 | `Sources/CUACore/` | AX 桥、MCP 服务器、`AppFramework`、`TCCResponsibility` |
+| `Sources/CUACore/SnapshotCapture.swift` | 截图（SCScreenshotManager）+ OCR（Vision）+ 尺寸预热缓存 |
+| `Sources/CUACore/WindowPicker.swift` | 系统共享选择器（SCContentSharingPicker） |
+| `Sources/CUACore/SessionRecorder.swift` | 操作过程录像（SCRecordingOutput / SCRECordingEditor） |
 | `Sources/dsh-cua/` | CLI 入口 |
 | `Sources/cua-selftest/` | 端到端自检 |
 | `plugin/` | DSH 侧边栏面板 |

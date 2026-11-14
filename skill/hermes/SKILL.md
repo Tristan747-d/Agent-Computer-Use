@@ -197,3 +197,11 @@ screencapture -x -l <winid> /tmp/x.png    # 即使窗口被遮挡也能取到真
 - 全屏或最小化的窗口可能取不到截图。
 - **跑 CUA 期间不要做 benchmark**：持续占用 CPU/GPU，会污染本机冷态基线（M5 有可逆 GPU 功耗塌缩，这是已知最大测量混淆源）。
 - 涉及删除数据、付款、发消息、装软件等有外部副作用的操作，**先跟用户确认再动手**。
+
+## 4.0 新增：截图读字 / 挑窗口 / 录像
+
+- `get_app_state` 的截图改用 `SCScreenshotManager`（不起流、不抢前台），发给 agent 的图是 JPEG。
+- 截图后自动跑 `Vision.RecognizeTextRequest`，AX 树读不到的字（canvas / Electron 自绘 / 图片里的字）按像素坐标附在结果末尾。注意：这版 macOS 文本识别每换一种图片尺寸要重编一次 ANE 图（冷态 30–150 s），同尺寸第二次 <1 s；冷态那次只等 1.2 s，不拖住工具调用。
+- `pick_window` 用 `SCContentSharingPicker` 弹系统选择器，默认排除本程序与 DSH 面板。
+- `start_recording` / `stop_recording` 用 `SCRecordingOutput` 录 .mov（H.264 15fps，最长边 ≤2400px），落 `~/Library/Caches/dsh-cua/recordings`。
+- `open_recording` 用 `SCRECordingEditor`（macOS 27+）弹预览/分享界面——**会弹窗**，仅在用户明确要求时调用。

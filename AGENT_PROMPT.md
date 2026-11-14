@@ -24,8 +24,14 @@
 | `drag` | | 拖拽 |
 | `perform_secondary_action` | | 执行 AX 树里 `actions=[…]` 列出的额外动作 |
 | `clipboard_copy` | ✅ | 对 app 发 Cmd+C 并返回剪贴板内容 |
+| `pick_window` | | app 开多窗口时，让用户在系统共享选择器里亲手挑一个 |
+| `start_recording` / `stop_recording` | | 录这个窗口的操作过程（.mov），适合用户要回看的任务 |
+| `open_recording` | | 弹系统录像编辑器（**会弹窗**，只在用户要求看录像时用） |
 
 `app` 参数接受显示名、完整路径或 bundle id；app 未运行会自动后台拉起。
+
+`get_app_state` 的截图用 `SCScreenshotManager`（不抢前台）并附 Vision 文字识别：
+AX 读不到的字（canvas / Electron 自绘 / 图片里的字）按像素坐标列在结果末尾。
 
 同时 DSH 侧边栏有一个实时面板（用户看得到）：目标 app、窗口几何、元素数、
 动作日志。你每次调用工具都会出现在那里——这既是用户信任的来源，也意味着

@@ -6,7 +6,7 @@ whenToUse: 需要点击/输入/读取某个 Mac app 的界面时；或用户让�
 
 # Computer Use（macOS 桌面控制）
 
-OpenClaw 接入的 MCP 服务器 `dsh-computer-use`，16 个工具。工具名在 OpenClaw
+OpenClaw 接入的 MCP 服务器 `dsh-computer-use`，20 个工具。工具名在 OpenClaw
 里带 `mcp__` 前缀（前缀模板以你实际看到的为准，认 `<tool>` 后缀即可，
 如 `list_apps` / `probe_app` / `get_app_state`）。
 不是 Codex/OpenAI 的东西——纯 Accessibility API + CoreGraphics，无任何外部依赖。
@@ -30,6 +30,10 @@ OpenClaw 接入的 MCP 服务器 `dsh-computer-use`，16 个工具。工具名�
 | `stop_live_view` | ✅ | 停止实时视频 |
 | `live_view_status` | ✅ | 查询实时视频状态与流地址 |
 | `probe_app` | ✅ | 先探测这个 app 是什么框架、多少节点、属于哪一层（**拉全树之前先调这个**） |
+| `pick_window` | | 让**用户**用系统共享选择器亲手挑窗口（app 多窗口时别再猜） |
+| `start_recording` | | 录这个窗口的操作过程（SCRecordingOutput，.mov） |
+| `stop_recording` | | 停止录像，返回路径 / 时长 / 大小 |
+| `open_recording` | | 系统录像编辑器预览（**会弹窗**，仅用户要求时用） |
 
 `app` 参数可用**显示名、完整路径或 bundle id**。app 没运行时会自动后台拉起。
 
@@ -199,3 +203,11 @@ screencapture -x -l <winid> /tmp/x.png    # 即使窗口被遮挡也能取到真
 - 全屏或最小化的窗口可能取不到截图。
 - **跑 CUA 期间不要做 benchmark**：持续占用 CPU/GPU，会污染本机冷态基线（M5 有可逆 GPU 功耗塌缩，这是已知最大测量混淆源）。
 - 涉及删除数据、付款、发消息、装软件等有外部副作用的操作，**先跟用户确认再动手**。
+
+## 4.0 新增：截图读字 / 挑窗口 / 录像
+
+- `get_app_state` 的截图改用 `SCScreenshotManager`（不起流、不抢前台），发给 agent 的图是 JPEG。
+- 截图后自动跑 `Vision.RecognizeTextRequest`，AX 树读不到的字（canvas / Electron 自绘 / 图片里的字）按像素坐标附在结果末尾。注意：这版 macOS 文本识别每换一种图片尺寸要重编一次 ANE 图（冷态 30–150 s），同尺寸第二次 <1 s；冷态那次只等 1.2 s，不拖住工具调用。
+- `pick_window` 用 `SCContentSharingPicker` 弹系统选择器，默认排除本程序与 DSH 面板。
+- `start_recording` / `stop_recording` 用 `SCRecordingOutput` 录 .mov（H.264 15fps，最长边 ≤2400px），落 `~/Library/Caches/dsh-cua/recordings`。
+- `open_recording` 用 `SCRECordingEditor`（macOS 27+）弹预览/分享界面——**会弹窗**，仅在用户明确要求时调用。

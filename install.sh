@@ -263,7 +263,7 @@ install_hermes() {
     # the config now says, not by the pipeline's exit status.
     printf 'y\n' | hermes mcp add dsh-computer-use --command "${BIN}" --args mcp --connect-timeout 30 >/dev/null 2>&1
     if hermes mcp list 2>/dev/null | grep -q "dsh-computer-use"; then
-        ok "MCP server registered (16 tools)"
+        ok "MCP server registered (20 tools)"
     else
         die "hermes mcp add failed — server not registered"
     fi

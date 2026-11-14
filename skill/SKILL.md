@@ -27,6 +27,10 @@ whenToUse: 需要点击/输入/读取某个 Mac app 的界面时；或用户让�
 | `mcp__computer__start_live_view` | ✅ | 开启目标窗口**实时视频**（10fps MJPEG，不抢前台） |
 | `mcp__computer__stop_live_view` | ✅ | 停止实时视频 |
 | `mcp__computer__live_view_status` | ✅ | 查询实时视频状态与流地址 |
+| `mcp__computer__pick_window` | | 让**用户**用系统共享选择器亲手挑窗口（app 多窗口时别再猜） |
+| `mcp__computer__start_recording` | | 录这个窗口的操作过程（SCRecordingOutput，.mov） |
+| `mcp__computer__stop_recording` | | 停止录像，返回路径 / 时长 / 大小 |
+| `mcp__computer__open_recording` | | 系统录像编辑器预览（**会弹窗**，仅用户要求时用） |
 | `mcp__computer__probe_app` | ✅ | 先探测这个 app 是什么框架、多少节点、属于哪一层（**拉全树之前先调这个**） |
 
 `app` 参数可用**显示名、完整路径或 bundle id**。app 没运行时会自动后台拉起。
@@ -39,6 +43,11 @@ whenToUse: 需要点击/输入/读取某个 Mac app 的界面时；或用户让�
 **所有动作默认静默**：直投目标进程（AX API / `CGEvent.postToPid`），**绝不把 app 抢到前台**，
 用户的前台、焦点、光标、剪贴板都不受影响。想看画面就开 `start_live_view`（实时视频，
 ScreenCaptureKit 抓后台窗口），不要靠反复截图。
+
+`get_app_state` 的截图现在用 `SCScreenshotManager`（不起流、不抢前台），并附一份
+Vision 文字识别结果：AX 树读不到的字（canvas / Electron 自绘 / 图片里的字）会按阅读顺序
+列出像素坐标和置信度。首次遇到某尺寸会先只回 AX 树（OCR 模型冷加载 30–150 s），
+下一次同尺寸调用就带上文字。
 
 少数动作 macOS 会静默丢弃（对后台 app 无效），**不要依赖**：
 - `postToPid` 的**鼠标点击 / 滚轮 / ⌘ 组合键** → 全部不投递。

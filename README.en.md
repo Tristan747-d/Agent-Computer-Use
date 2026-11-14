@@ -15,7 +15,7 @@ what you are doing.
                 │ MCP over stdio
 ┌───────────────▼─────────────────────────┐
 │  Agent Computer Use (signed .app)        │
-│  16 tools · AX tree · screenshots · live │
+│  20 tools · AX tree · OCR · recording    │
 └───────────────┬─────────────────────────┘
                 │ delivered to process (never foregrounded)
 ┌───────────────▼─────────────────────────┐
@@ -141,18 +141,44 @@ One binary, three naming conventions:
 | OpenClaw | `mcp__…` (match the `<tool>` suffix) | `~/.openclaw/openclaw.json` |
 | Hermes | `dsh-computer-use:<tool>` | `~/.hermes/config.yaml` |
 
-16 tools: `list_apps`, `probe_app`, `get_app_state`, `click`, `set_value`,
+20 tools: `list_apps`, `probe_app`, `get_app_state`, `click`, `set_value`,
 `select_text`, `press_key`, `type_text`, `scroll`, `drag`, `move_mouse`,
 `perform_secondary_action`, `clipboard_copy`, `start_live_view`,
-`stop_live_view`, `live_view_status`.
+`stop_live_view`, `live_view_status`, plus the 4.0 additions:
+`pick_window` (system sharing picker — let the user choose the window),
+`start_recording` / `stop_recording` (SCRecordingOutput, .mov) and
+`open_recording` (SCRECordingEditor preview/share).
 
 ### Typical flow
 
 ```
 probe_app("Notion")     → framework, node count, can I click by index?
-get_app_state("Notion") → full AX tree + screenshot
+get_app_state("Notion") → full AX tree + screenshot + OCR text
 click(element_index=14) → click
+pick_window()           → user picks the window in the system sharing picker
+start_recording(...)    → record the working session to .mov
+stop_recording()        → stop and report the file
 ```
+
+## What 4.0 added
+
+- **Screenshots moved to `SCScreenshotManager`.** `CGWindowListCreateImage` is
+  obsolete since macOS 15; the one-shot capture API keeps the window in the
+  background, needs no stream, and measured 150–650 ms per shot on this machine.
+- **Screenshot text via `Vision.RecognizeTextRequest`.** AX misses text drawn on
+  canvas / Electron surfaces / inside images. OCR lines are appended to
+  `get_app_state` with pixel rects and confidence. One caveat measured on this
+  machine: this macOS build recompiles an ANE graph per image size (30–150 s
+  cold, <1 s warm), so a cold size waits only 1.2 s and the recognition task
+  keeps compiling in the background — the next same-size call carries the text.
+- **`pick_window` uses `SCContentSharingPicker`** so the user — not a heuristic —
+  chooses the window when an app has many. The panel itself is excluded.
+- **`start_recording` / `stop_recording` use `SCRecordingOutput`** (H.264, 15 fps,
+  longest edge ≤2400 px) into `~/Library/Caches/dsh-cua/recordings`, and
+  `open_recording` presents `SCRECordingEditor` (macOS 27+) for preview/share —
+  that one does surface a window, so only call it on request.
+- `SCVideoEffectOutput` is intentionally not wired: it is `API_UNAVAILABLE(macos)`
+  in the headers — an iOS camera effect, unrelated to window capture.
 
 **Call `probe_app` first.** One call tells you which route to take:
 
@@ -450,9 +476,12 @@ degrade to a rendered "disconnected" state rather than a broken mount.
 ├── Sources/
 │   ├── CUACore/
 │   │   ├── AXBridge.swift        # AX tree, element registry, diffing
-│   │   ├── ActionBridge.swift    # CGEvent input, AX actions, capture
+│   │   ├── ActionBridge.swift    # CGEvent input, AX actions
+│   │   ├── SnapshotCapture.swift # SCScreenshotManager + Vision OCR
+│   │   ├── WindowPicker.swift    # SCContentSharingPicker
+│   │   ├── SessionRecorder.swift # SCRecordingOutput / SCRECordingEditor
 │   │   ├── StateBroadcaster.swift# live state for the panel
-│   │   └── MCPServer.swift       # JSON-RPC over stdio, 11 tool schemas
+│   │   └── MCPServer.swift       # JSON-RPC over stdio, 20 tool schemas
 │   ├── dsh-cua/main.swift        # mcp | doctor | request-perms
 │   └── cua-selftest/main.swift   # live-app verification
 ├── plugin/
