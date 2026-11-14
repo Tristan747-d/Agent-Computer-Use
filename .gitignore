@@ -19,3 +19,4 @@ xcuserdata/
 
 # Local state published at runtime
 *.tmp
+plugin/cordis.patch.yml
