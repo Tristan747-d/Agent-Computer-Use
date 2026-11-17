@@ -67,9 +67,9 @@ cat > "${BUNDLE}/Contents/Info.plist" <<PLIST
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>4.0.0</string>
+	<string>5.0.0</string>
 	<key>CFBundleVersion</key>
-	<string>400</string>
+	<string>500</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>LSUIElement</key>
@@ -88,6 +88,13 @@ PLIST
 
 echo "==> Validating plist"
 plutil -lint "${BUNDLE}/Contents/Info.plist"
+
+# Compatibility alias must exist BEFORE signing. Adding it afterwards (as the
+# install step used to) mutates a sealed bundle and `codesign -v` then reports
+# "a sealed resource is missing or invalid" even though the signature itself is
+# intact. Only one copy of the byte stream matters: it lives at Contents/MacOS/
+# agent-cua and dsh-cua is just a symlink to it.
+ln -sf "${EXE_NAME}" "${BUNDLE}/Contents/MacOS/dsh-cua"
 
 # Finder copies xattrs (FinderInfo, resource forks) onto files it has touched.
 # codesign refuses to seal a bundle carrying them, and the failure reads

@@ -188,6 +188,19 @@ stop_recording()        → stop and report the file
 | `L2_shallow_tree` | Thin tree, but a window exists | Coordinates + menu bar |
 | `L3_no_windows` | No window at all | Menus + blind keyboard nav |
 
+### Virtual pointer (5.0)
+
+Pointing where the work happens, a small blue virtual pointer marks the action.
+It is shown **only while you already have the target app frontmost**; it hides
+itself when the app goes to the background. It is a non-activating transparent
+panel: it takes no focus, swallows no clicks, and never raises a window by
+existing.
+
+`click`, `scroll`, `drag` and AX element presses travel the pointer to the
+target first and flash a ring; `move_mouse` — the one tool that moves the real
+cursor — makes the virtual pointer follow the same path. So when you bring an
+app forward to watch, you can see exactly where each step lands.
+
 ### Permissions
 
 Two macOS permissions. **Accessibility is required**; Screen Recording is
@@ -286,6 +299,15 @@ dsh-cua ──writes──> ~/.dsh-cua/<pid>.json + viewport.png
 ```
 
 ### Changelog
+
+**v5.0** — virtual pointer
+
+- **A virtual pointer marks what the agent is doing.** A click-through,
+  non-activating panel shows a blue cursor at the action site — but only while
+  the target app is already frontmost, so it never asks for (or takes) focus.
+  `click` / `scroll` / `drag` / AX presses move it into place and flash a ring;
+  `move_mouse` traces the same path as the real cursor. The stdio protocol loop
+  moved off the main thread so AppKit can run the window it draws into.
 
 **v2.1** — live video
 
