@@ -188,6 +188,46 @@ for k in testKeys {
 }
 print("mapped \(mapped)/\(testKeys.count) test keys")
 
+section("virtual pointer visibility rule")
+// The pointer is a presentation, not an input source: it must be visible only
+// while the user is already looking at the target app, and never when the app
+// is in the background. These assertions are pure — nothing is activated.
+do {
+    let targetPID = app.processIdentifier
+    let other: pid_t = targetPID == 1 ? 2 : 1
+    let frame = CGRect(x: 100, y: 100, width: 800, height: 600)
+    let inside = CGPoint(x: 400, y: 400)
+    let outside = CGPoint(x: 5, y: 5)
+    let cases: [(String, Bool, Bool)] = [
+        ("frontmost + inside window", true,
+         VirtualPointer.shouldShow(targetPID: targetPID, frontmostPID: targetPID,
+                                   targetWindow: 42, targetFrame: frame, point: inside)),
+        ("background app", false,
+         VirtualPointer.shouldShow(targetPID: targetPID, frontmostPID: other,
+                                   targetWindow: 42, targetFrame: frame, point: inside)),
+        ("no frontmost app", false,
+         VirtualPointer.shouldShow(targetPID: targetPID, frontmostPID: nil,
+                                   targetWindow: 42, targetFrame: frame, point: inside)),
+        ("no window yet", false,
+         VirtualPointer.shouldShow(targetPID: targetPID, frontmostPID: targetPID,
+                                   targetWindow: 0, targetFrame: frame, point: inside)),
+        ("no frame yet", false,
+         VirtualPointer.shouldShow(targetPID: targetPID, frontmostPID: targetPID,
+                                   targetWindow: 42, targetFrame: .zero, point: inside)),
+        ("point outside window", false,
+         VirtualPointer.shouldShow(targetPID: targetPID, frontmostPID: targetPID,
+                                   targetWindow: 42, targetFrame: frame, point: outside)),
+    ]
+    for (label, expected, actual) in cases {
+        if actual == expected {
+            print("  ✅ \(label): shown=\(actual) (expected \(expected))")
+        } else {
+            failures.append("virtual pointer / \(label): shown=\(actual), expected \(expected)")
+            print("  ❌ \(label): shown=\(actual), expected \(expected)")
+        }
+    }
+}
+
 section("FINAL silence check")
 let endFront = frontmost()
 print("frontmost at start: \(startFront)")

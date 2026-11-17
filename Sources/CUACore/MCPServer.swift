@@ -16,6 +16,11 @@ public final class MCPServer {
     /// background window without raising it, preserving the silence contract.
     private let streamer = ScreenStreamer()
     private lazy var mjpeg = MJPEGServer(streamer: streamer)
+    /// Foreground-only virtual pointer overlay; see `VirtualPointer.swift`.
+    private let pointer = VirtualPointer()
+    /// The app the agent is currently working on, so tools without an `app`
+    /// argument (e.g. `move_mouse`) can still show the pointer over it.
+    private var trackedApp: NSRunningApplication?
 
     private var initialized = false
     /// 最近一次录好的文件，供 open_recording 不带参数时打开。
@@ -36,20 +41,23 @@ public final class MCPServer {
             self.state.setStreamURL(port.map { "http://127.0.0.1:\($0)/stream.mjpg" })
         }
 
-        defer {
-            mjpeg.stop()
-            streamer.stop()
-            if #available(macOS 15.0, *), SessionRecorder.shared.isRecording {
-                let semaphore = DispatchSemaphore(value: 0)
-                Task.detached {
-                    _ = await SessionRecorder.shared.stop()
-                    semaphore.signal()
-                }
-                semaphore.wait()
-            }
-            state.setStreamURL(nil)
-            state.markDisconnected()
+        // AppKit owns the main thread: the virtual pointer is an NSPanel, and
+        // windows only composite while the main run loop is spinning. The stdio
+        // protocol loop blocks on readLine, so it runs on a worker thread.
+        // Requests are still handled one at a time (the gate below), which keeps
+        // response order identical to request order.
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            serveStdio()
         }
+
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)  // no Dock icon, never activates
+        app.finishLaunching()
+        app.run()
+    }
+
+    /// Read JSON-RPC lines from stdin and answer them serially.
+    private func serveStdio() {
         while let line = readLine(strippingNewline: true) {
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.isEmpty { continue }
@@ -66,6 +74,33 @@ public final class MCPServer {
             }
             gate.wait()
         }
+        // stdin closed: the client is gone. Tear down, then stop AppKit so
+        // `app.run()` returns and the process exits normally.
+        shutdown()
+        DispatchQueue.main.async {
+            NSApp.stop(nil)
+            if let wake = NSEvent.otherEvent(
+                with: .applicationDefined, location: .zero, modifierFlags: [],
+                timestamp: 0, windowNumber: 0, context: nil, subtype: 0, data1: 0, data2: 0
+            ) {
+                NSApp.postEvent(wake, atStart: true)
+            }
+        }
+    }
+
+    private func shutdown() {
+        mjpeg.stop()
+        streamer.stop()
+        if #available(macOS 15.0, *), SessionRecorder.shared.isRecording {
+            let semaphore = DispatchSemaphore(value: 0)
+            Task.detached {
+                _ = await SessionRecorder.shared.stop()
+                semaphore.signal()
+            }
+            semaphore.wait()
+        }
+        state.setStreamURL(nil)
+        state.markDisconnected()
     }
 
     // MARK: - Dispatch
@@ -163,6 +198,20 @@ public final class MCPServer {
         }
     }
 
+    /// Whether a tool's `app` resolves and becomes the tracked target.
+    @discardableResult
+    private func track(_ app: NSRunningApplication) -> NSRunningApplication {
+        trackedApp = app
+        return app
+    }
+
+    private func resolveMoveTarget(_ args: [String: Any]) -> NSRunningApplication? {
+        if let name = args["app"] as? String, !name.isEmpty {
+            return try? ax.resolveApp(name)
+        }
+        return trackedApp
+    }
+
     private func call(name: String, args: [String: Any]) async throws -> [[String: Any]] {
         // Foreground fallback is opt-in per call, and off unless asked for.
         actions.allowsForegroundFallback = (args["allow_foreground"] as? Bool) ?? false
@@ -182,13 +231,28 @@ public final class MCPServer {
             return try await getAppState(args)
 
         case "click":
-            return try clickTool(args)
+            return try await clickTool(args)
 
         case "move_mouse":
             guard let x = doubleValue(args["x"]), let y = doubleValue(args["y"]) else {
                 throw AXError.invalidArgument("x and y are required")
             }
-            try actions.moveMouse(to: CGPoint(x: x, y: y))
+            let destination = CGPoint(x: x, y: y)
+            if let app = resolveMoveTarget(args) {
+                // Trace the same path the real cursor takes, so the virtual
+                // pointer follows in lockstep instead of teleporting.
+                let pid = app.processIdentifier
+                let landing = actions.windowInfo(for: app, containing: destination)
+                pointer.track(pid: pid, frame: landing?.frame, windowNumber: landing?.id)
+                try actions.moveMouse(to: destination) { [weak self] p in
+                    guard let self else { return }
+                    let win = self.actions.windowInfo(for: app, containing: p) ?? landing
+                    self.pointer.update(pid: pid, point: p, frame: win?.frame,
+                                        windowNumber: win?.id, effect: .hover)
+                }
+            } else {
+                try actions.moveMouse(to: destination)
+            }
             return [["type": "text", "text":
                 "Moved pointer to (\(Int(x)), \(Int(y))). Note: moving the cursor is inherently visible "
                 + "to the user; no click was performed."]]
@@ -229,10 +293,10 @@ public final class MCPServer {
                 + "no clipboard used, app not brought forward. Re-fetch app state to confirm."]]
 
         case "scroll":
-            return try scrollTool(args)
+            return try await scrollTool(args)
 
         case "drag":
-            return try dragTool(args)
+            return try await dragTool(args)
 
         case "perform_secondary_action":
             let el = try element(args)
@@ -566,7 +630,7 @@ public final class MCPServer {
     }
 
     private func getAppState(_ args: [String: Any]) async throws -> [[String: Any]] {
-        let app = try ax.resolveApp(try requireApp(args))
+        let app = track(try ax.resolveApp(try requireApp(args)))
         let disableDiff = (args["disableDiff"] as? Bool) ?? false
 
         ax.registry.reset()
@@ -719,31 +783,44 @@ public final class MCPServer {
         return out
     }
 
-    private func clickTool(_ args: [String: Any]) throws -> [[String: Any]] {
-        let app = try ax.resolveApp(try requireApp(args))
+    private func clickTool(_ args: [String: Any]) async throws -> [[String: Any]] {
+        let app = track(try ax.resolveApp(try requireApp(args)))
         let appEl = ax.appElement(app)
         let pid = app.processIdentifier
         let button = args["mouse_button"] as? String ?? "left"
         let count = args["click_count"] as? Int ?? 1
+        let coordinate = (x: doubleValue(args["x"]), y: doubleValue(args["y"]))
 
         // Coordinate click: resolve through the AX hit test, then AXPress. Silent.
-        if let x = doubleValue(args["x"]), let y = doubleValue(args["y"]) {
+        if let x = coordinate.x, let y = coordinate.y {
+            let p = CGPoint(x: x, y: y)
+            let win = actions.windowInfo(for: app, containing: p)
+            await pointer.move(pid: pid, to: p, frame: win?.frame, windowNumber: win?.id)
             let r = try actions.clickSilent(appEl: appEl, pid: pid, x: x, y: y, button: button, count: count)
+            await pointer.flash(.click)
             return [["type": "text", "text": "\(r.detail)\ndelivery=\(r.delivery.rawValue)"]]
         }
 
         let el = try element(args)
+        let center = actions.centerOf(el)
+        if let center {
+            let win = actions.windowInfo(for: app, containing: center)
+            await pointer.move(pid: pid, to: center, frame: win?.frame, windowNumber: win?.id)
+        }
 
-        // Preferred: press the element itself through AX.
+        // Preferred: press the element itself through AX, after previewing the
+        // target location so the marker describes the action rather than lagging it.
         if let r = try? actions.press(el) {
+            if center != nil { await pointer.flash(.click) }
             return [["type": "text", "text": "\(r.detail) element \(try index(args)).\ndelivery=\(r.delivery.rawValue)"]]
         }
 
         // No AX action on the element (common for custom-drawn UI). Fall back to a
         // silent hit-test click at its center; ancestors are tried too.
-        if let center = actions.centerOf(el) {
+        if let center {
             let r = try actions.clickSilent(appEl: appEl, pid: pid, x: center.x, y: center.y,
                                             button: button, count: count)
+            await pointer.flash(.click)
             return [["type": "text", "text":
                 "Element \(try index(args)) has no AX action; \(r.detail)\ndelivery=\(r.delivery.rawValue)"]]
         }
@@ -764,8 +841,8 @@ public final class MCPServer {
         return nil
     }
 
-    private func scrollTool(_ args: [String: Any]) throws -> [[String: Any]] {
-        let app = try ax.resolveApp(try requireApp(args))
+    private func scrollTool(_ args: [String: Any]) async throws -> [[String: Any]] {
+        let app = track(try ax.resolveApp(try requireApp(args)))
         let appEl = ax.appElement(app)
         let direction = args["direction"] as? String ?? "down"
         let pages = (args["pages"] as? Double) ?? Double(args["pages"] as? Int ?? 1)
@@ -785,20 +862,31 @@ public final class MCPServer {
         if let el = try? element(args) {
             actions.focus(el)
         }
+        let win = actions.windowInfo(for: app, containing: p)
+        await pointer.move(pid: app.processIdentifier, to: p, frame: win?.frame, windowNumber: win?.id)
         let r = try actions.scrollSilent(appEl: appEl, pid: app.processIdentifier,
                                          x: p.x, y: p.y, direction: direction, pages: pages)
+        await pointer.flash(.drag)
         return [["type": "text", "text": "\(r.detail)\ndelivery=\(r.delivery.rawValue)"]]
     }
 
-    private func dragTool(_ args: [String: Any]) throws -> [[String: Any]] {
-        let app = try ax.resolveApp(try requireApp(args))
+    private func dragTool(_ args: [String: Any]) async throws -> [[String: Any]] {
+        let app = track(try ax.resolveApp(try requireApp(args)))
         guard let fx = doubleValue(args["from_x"]), let fy = doubleValue(args["from_y"]),
               let tx = doubleValue(args["to_x"]), let ty = doubleValue(args["to_y"]) else {
             throw AXError.invalidArgument("from_x, from_y, to_x, to_y are required")
         }
-        let r = try actions.dragSilent(pid: app.processIdentifier,
-                                       from: CGPoint(x: fx, y: fy), to: CGPoint(x: tx, y: ty),
-                                       button: args["mouse_button"] as? String ?? "left")
+        let from = CGPoint(x: fx, y: fy)
+        let to = CGPoint(x: tx, y: ty)
+        let pid = app.processIdentifier
+        let startWin = actions.windowInfo(for: app, containing: from)
+        await pointer.move(pid: pid, to: from, frame: startWin?.frame, windowNumber: startWin?.id)
+        let r = try actions.dragSilent(pid: pid, from: from, to: to,
+                                       button: args["mouse_button"] as? String ?? "left") { p in
+            let win = self.actions.windowInfo(for: app, containing: p)
+            self.pointer.update(pid: pid, point: p, frame: win?.frame, windowNumber: win?.id, effect: .drag)
+        }
+        await pointer.flash(.drag)
         return [["type": "text", "text": "\(r.detail)\ndelivery=\(r.delivery.rawValue)"]]
     }
 
@@ -951,10 +1039,11 @@ public final class MCPServer {
         ],
         [
             "name": "move_mouse",
-            "description": "Move the pointer to screen coordinates without clicking. Use this to HOVER: macOS opens a menu's submenu on hover, whereas clicking the parent item activates it and closes the menu. Moving the cursor is inherently visible to the user, so this is the one action that is not silent.",
+            "description": "Move the pointer to screen coordinates without clicking. Use this to HOVER: macOS opens a menu's submenu on hover, whereas clicking the parent item activates it and closes the menu. Moving the cursor is inherently visible to the user, so this is the one action that is not silent. The virtual pointer follows the same path when the target app is frontmost; pass `app` to anchor it if you have not used another tool on that app yet.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
+                    "app": appProp,
                     "x": ["type": "number", "description": "X coordinate in screen points"],
                     "y": ["type": "number", "description": "Y coordinate in screen points"],
                     "allow_foreground": foregroundProp,

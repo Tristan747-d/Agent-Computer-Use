@@ -443,7 +443,8 @@ public final class ActionBridge {
 
     /// Drag with events posted to the target process. Verified to reach a
     /// background app without disturbing the frontmost one.
-    public func dragSilent(pid: pid_t, from: CGPoint, to: CGPoint, button: String = "left") throws -> DeliveryResult {
+    public func dragSilent(pid: pid_t, from: CGPoint, to: CGPoint, button: String = "left",
+                           onStep: ((CGPoint) -> Void)? = nil) throws -> DeliveryResult {
         let (downType, upType, cgButton) = mouseTypes(button)
         let dragType: CGEventType = button.lowercased().hasPrefix("r") ? .rightMouseDragged : .leftMouseDragged
 
@@ -453,6 +454,7 @@ public final class ActionBridge {
         }
         down.postToPid(pid)
         usleep(50_000)
+        onStep?(from)
 
         let steps = 20
         for i in 1...steps {
@@ -461,6 +463,7 @@ public final class ActionBridge {
             guard let move = CGEvent(mouseEventSource: nil, mouseType: dragType,
                                      mouseCursorPosition: p, mouseButton: cgButton) else { continue }
             move.postToPid(pid)
+            onStep?(p)
             usleep(10_000)
         }
 
@@ -474,7 +477,8 @@ public final class ActionBridge {
 
     /// Move the pointer. This is inherently visible to the user; it is kept for
     /// the explicit `move_mouse` tool only and is never implied by other actions.
-    public func moveMouse(to point: CGPoint, steps: Int = 8) throws {
+    public func moveMouse(to point: CGPoint, steps: Int = 8,
+                          onStep: ((CGPoint) -> Void)? = nil) throws {
         guard let start = CGEvent(source: nil)?.location else {
             throw InputError.eventCreationFailed
         }
@@ -484,6 +488,7 @@ public final class ActionBridge {
             guard let move = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved,
                                      mouseCursorPosition: p, mouseButton: .left) else { continue }
             move.post(tap: .cghidEventTap)
+            onStep?(p)
             usleep(8_000)
         }
     }
@@ -577,15 +582,26 @@ public final class ActionBridge {
     }
 
     public func windowID(for app: NSRunningApplication) -> CGWindowID? {
+        return windowInfo(for: app)?.id
+    }
+
+    /// Window that actually sits under a screen point.
+    ///
+    /// A process can own several windows (a main window plus panels, sheets or a
+    /// detached viewer). Anchoring the virtual pointer to "the largest window"
+    /// would float it over the wrong one, so prefer the smallest window whose
+    /// bounds contain the point, and fall back to the largest window.
+    public func windowInfo(for app: NSRunningApplication, containing point: CGPoint? = nil)
+        -> (id: CGWindowID, frame: CGRect)? {
         let pid = app.processIdentifier
 
-        func pick(excludingDesktop: Bool) -> CGWindowID? {
+        func pick(excludingDesktop: Bool) -> (id: CGWindowID, frame: CGRect)? {
             var options: CGWindowListOption = [.optionOnScreenOnly]
             if excludingDesktop { options.insert(.excludeDesktopElements) }
             let list = CGWindowListCopyWindowInfo(options, kCGNullWindowID)
             guard let windows = list as? [[String: Any]] else { return nil }
-            // Prefer the largest on-screen window belonging to this pid (usually the key window).
-            var best: (CGWindowID, CGFloat)?
+            var best: (id: CGWindowID, frame: CGRect)?
+            var smallestContaining: (id: CGWindowID, frame: CGRect)?
             for w in windows {
                 guard let ownerPID = w[kCGWindowOwnerPID as String] as? pid_t, ownerPID == pid,
                       let wid = w[kCGWindowNumber as String] as? CGWindowID,
@@ -593,9 +609,15 @@ public final class ActionBridge {
                       let rect = CGRect(dictionaryRepresentation: boundsDict as CFDictionary) else { continue }
                 let area = rect.width * rect.height
                 if area < 100 { continue }
-                if best == nil || area > best!.1 { best = (wid, area) }
+                if best == nil || area > best!.frame.width * best!.frame.height { best = (wid, rect) }
+                if let point, rect.contains(point) {
+                    if smallestContaining == nil
+                        || area < smallestContaining!.frame.width * smallestContaining!.frame.height {
+                        smallestContaining = (wid, rect)
+                    }
+                }
             }
-            return best?.0
+            return smallestContaining ?? best
         }
 
         // `.excludeDesktopElements` also drops Finder's own desktop window, which
